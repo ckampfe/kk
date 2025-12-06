@@ -500,7 +500,9 @@ fn handle_event(event: Event, model: &Model) -> Option<Message> {
                 KeyCode::Char('h') => Some(Message::MoveCardLeft),
                 KeyCode::Char('l') => Some(Message::MoveCardRight),
                 KeyCode::Char('q') => Some(Message::Quit),
-                KeyCode::Char('m') | KeyCode::Enter => Some(Message::SwitchToViewingBoardState),
+                KeyCode::Char('m') | KeyCode::Enter | KeyCode::Esc => {
+                    Some(Message::SwitchToViewingBoardState)
+                }
                 _ => None,
             },
             Mode::ViewingCardDetail => match key.code {
