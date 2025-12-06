@@ -46,6 +46,9 @@ impl Repo {
 
         let mut this = Self { conn };
 
+        // TODO rm this when there is a flow
+        // for creating a board on first run.
+        // or just have a default board?
         this.insert_board("my great board")?;
 
         Ok(this)
@@ -197,7 +200,7 @@ struct Model {
     current_board_id: u64,
     columns: Vec<Column>,
     selected: SelectedState,
-    working_state: WorkingState,
+    mode: Mode,
     running_state: RunningState,
     repo: Repo,
 }
@@ -239,7 +242,7 @@ impl Model {
                 column_id: 0,
                 card_index: None,
             },
-            working_state: WorkingState::ViewingBoard,
+            mode: Mode::ViewingBoard,
             running_state: RunningState::Running,
             repo,
         })
@@ -289,7 +292,7 @@ enum RunningState {
 }
 
 #[derive(Debug, Default, PartialEq)]
-enum WorkingState {
+enum Mode {
     #[default]
     ViewingBoard,
     ViewingCardDetail,
@@ -328,7 +331,9 @@ where
         f.into_temp_path()
     };
 
-    Command::new("/opt/homebrew/bin/nvim").arg(&path).status()?;
+    let editor = std::env::var("EDITOR")?;
+
+    Command::new(editor).arg(&path).status()?;
 
     let edited_text = std::fs::read_to_string(&path)?;
 
@@ -384,13 +389,13 @@ fn view(model: &mut Model, frame: &mut ratatui::Frame) {
 
         frame.render_stateful_widget(list, column_layout[1], &mut state);
 
-        if model.working_state == WorkingState::ViewingCardDetail
+        if model.mode == Mode::ViewingCardDetail
             && let Some(card) = model.selected_card()
         {
             let block = Block::bordered().title(format!("{} - {}", card.id, card.title));
             let paragraph = Paragraph::new(&*card.body).block(block);
 
-            let area = popup_area(frame.area(), 60, 25);
+            let area = popup_area(frame.area(), 60, 50);
 
             frame.render_widget(ratatui::widgets::Clear, area); //this clears out the background
             frame.render_widget(paragraph, area);
@@ -424,58 +429,31 @@ fn handle_event(model: &Model) -> anyhow::Result<Option<Message>> {
 }
 
 fn handle_key(key: crossterm::event::KeyEvent, model: &Model) -> Option<Message> {
-    match key.code {
-        KeyCode::Char('h') => match model.working_state {
-            WorkingState::ViewingBoard => Some(Message::NavigateLeft),
-            WorkingState::MovingCard => Some(Message::MoveCardLeft),
-            WorkingState::ViewingCardDetail => None,
+    match model.mode {
+        Mode::ViewingBoard => match key.code {
+            KeyCode::Char('h') => Some(Message::NavigateLeft),
+            KeyCode::Char('j') => Some(Message::NavigateDown),
+            KeyCode::Char('k') => Some(Message::NavigateUp),
+            KeyCode::Char('l') => Some(Message::NavigateRight),
+            KeyCode::Char('q') => Some(Message::Quit),
+            KeyCode::Char('m') => Some(Message::SwitchToMovingState),
+            KeyCode::Char('n') => Some(Message::NewCard),
+            KeyCode::Char('e') => Some(Message::EditCard),
+            KeyCode::Enter => Some(Message::ViewCardDetail),
+            _ => None,
         },
-        KeyCode::Char('j') => match model.working_state {
-            WorkingState::ViewingBoard => Some(Message::NavigateDown),
-            WorkingState::MovingCard => {
-                // TODO
-                // Some(Message::MoveCardDown)
-                None
-            }
-            WorkingState::ViewingCardDetail => None,
+        Mode::MovingCard => match key.code {
+            KeyCode::Char('h') => Some(Message::MoveCardLeft),
+            KeyCode::Char('l') => Some(Message::MoveCardRight),
+            KeyCode::Char('q') => Some(Message::Quit),
+            KeyCode::Char('m') => Some(Message::SwitchToViewingBoardState),
+            _ => None,
         },
-        KeyCode::Char('k') => match model.working_state {
-            WorkingState::ViewingBoard => Some(Message::NavigateUp),
-            WorkingState::MovingCard => {
-                // TODO
-                // Some(Message::MoveCardUp)
-                None
-            }
-            WorkingState::ViewingCardDetail => None,
+        Mode::ViewingCardDetail => match key.code {
+            KeyCode::Enter => Some(Message::SwitchToViewingBoardState),
+            KeyCode::Esc => Some(Message::SwitchToViewingBoardState),
+            _ => None,
         },
-        KeyCode::Char('l') => match model.working_state {
-            WorkingState::ViewingBoard => Some(Message::NavigateRight),
-            WorkingState::MovingCard => Some(Message::MoveCardRight),
-            WorkingState::ViewingCardDetail => None,
-        },
-        KeyCode::Char('q') => Some(Message::Quit),
-        KeyCode::Char('m') => match model.working_state {
-            WorkingState::ViewingBoard => Some(Message::SwitchToMovingState),
-            WorkingState::ViewingCardDetail => None,
-            WorkingState::MovingCard => Some(Message::SwitchToViewingBoardState),
-        },
-        KeyCode::Char('n') => Some(Message::NewCard),
-        KeyCode::Char('e') => match model.working_state {
-            WorkingState::ViewingBoard => Some(Message::EditCard),
-            WorkingState::ViewingCardDetail => None,
-            WorkingState::MovingCard => todo!(),
-        },
-        KeyCode::Enter => match model.working_state {
-            WorkingState::ViewingBoard => Some(Message::ViewCardDetail),
-            WorkingState::ViewingCardDetail => Some(Message::SwitchToViewingBoardState),
-            WorkingState::MovingCard => None,
-        },
-        KeyCode::Esc => match model.working_state {
-            WorkingState::ViewingBoard => None,
-            WorkingState::ViewingCardDetail => Some(Message::SwitchToViewingBoardState),
-            WorkingState::MovingCard => None,
-        },
-        _ => None,
     }
 }
 
@@ -520,18 +498,18 @@ where
                     .cards
                     .sort_unstable_by(|a, b| b.id.cmp(&a.id));
 
-                model.working_state = WorkingState::ViewingBoard;
+                model.mode = Mode::ViewingBoard;
                 model.selected.card_index = Some(0);
             }
         }
         Message::SwitchToMovingState => {
-            model.working_state = WorkingState::MovingCard;
+            model.mode = Mode::MovingCard;
             // select current card
             // cause moves to move the card between columns
         }
         Message::MoveCardLeft => move_selected_card_left(model)?,
         Message::MoveCardRight => move_selected_card_right(model)?,
-        Message::ViewCardDetail => model.working_state = WorkingState::ViewingCardDetail,
+        Message::ViewCardDetail => model.mode = Mode::ViewingCardDetail,
         Message::EditCard => {
             if let Some(card_index) = model.selected.card_index {
                 let card = &mut model.columns[model.selected.column_id].cards[card_index];
@@ -549,9 +527,9 @@ where
                 };
             }
 
-            model.working_state = WorkingState::ViewingBoard;
+            model.mode = Mode::ViewingBoard;
         }
-        Message::SwitchToViewingBoardState => model.working_state = WorkingState::ViewingBoard,
+        Message::SwitchToViewingBoardState => model.mode = Mode::ViewingBoard,
     };
 
     Ok(None)
