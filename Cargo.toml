@@ -12,3 +12,7 @@ ratatui = "0.29"
 regex = "1"
 rusqlite = "0.37"
 tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
