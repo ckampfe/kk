@@ -11,7 +11,6 @@ use rusqlite::{Connection, params};
 use std::cmp::min;
 use std::fmt::Display;
 use std::io::Write;
-use std::iter;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -129,93 +128,6 @@ impl Repo {
         Ok(cards)
     }
 
-    // fn todo_cards(&self) -> anyhow::Result<Vec<Card>> {
-    //     let mut s = self.conn.prepare(
-    //         "
-    //     select
-    //         id,
-    //         title,
-    //         body
-    //     from cards where status = 'todo'
-    //     order by id desc;
-    //     ",
-    //     )?;
-
-    //     let cards_iter = s.query_map([], |row| {
-    //         Ok(Card {
-    //             id: row.get(0)?,
-    //             title: row.get(1)?,
-    //             body: row.get(2)?,
-    //         })
-    //     })?;
-
-    //     let mut cards = vec![];
-
-    //     for card in cards_iter {
-    //         cards.push(card?);
-    //     }
-
-    //     Ok(cards)
-    // }
-
-    // fn doing_cards(&self) -> anyhow::Result<Vec<Card>> {
-    //     let mut s = self.conn.prepare(
-    //         "
-    //     select
-    //         id,
-    //         title,
-    //         body
-    //     from cards where status = 'doing'
-    //     order by id desc;
-    //     ",
-    //     )?;
-
-    //     let cards_iter = s.query_map([], |row| {
-    //         Ok(Card {
-    //             id: row.get(0)?,
-    //             title: row.get(1)?,
-    //             body: row.get(2)?,
-    //         })
-    //     })?;
-
-    //     let mut cards = vec![];
-
-    //     for card in cards_iter {
-    //         cards.push(card?);
-    //     }
-
-    //     Ok(cards)
-    // }
-
-    // fn done_cards(&self) -> anyhow::Result<Vec<Card>> {
-    //     let mut s = self.conn.prepare(
-    //         "
-    //     select
-    //         id,
-    //         title,
-    //         body
-    //     from cards where status = 'done'
-    //     order by id desc;
-    //     ",
-    //     )?;
-
-    //     let cards_iter = s.query_map([], |row| {
-    //         Ok(Card {
-    //             id: row.get(0)?,
-    //             title: row.get(1)?,
-    //             body: row.get(2)?,
-    //         })
-    //     })?;
-
-    //     let mut cards = vec![];
-
-    //     for card in cards_iter {
-    //         cards.push(card?);
-    //     }
-
-    //     Ok(cards)
-    // }
-
     fn update_card(&self, id: u64, title: &str, body: &str) -> anyhow::Result<()> {
         self.conn.execute(
             "
@@ -307,9 +219,9 @@ impl Model {
         &self.columns[self.selected.column_id].cards
     }
 
-    fn current_cards_mut(&mut self) -> &mut Vec<Card> {
-        &mut self.columns[self.selected.column_id].cards
-    }
+    // fn current_cards_mut(&mut self) -> &mut Vec<Card> {
+    //     &mut self.columns[self.selected.column_id].cards
+    // }
 }
 
 #[derive(Debug, Default)]
@@ -355,7 +267,6 @@ enum Message {
     NavigateRight,
     Quit,
     NewCard,
-    Enter,
     SwitchToMovingState,
     MoveCardLeft,
     // MoveCardDown,
@@ -396,17 +307,10 @@ where
 fn view(model: &mut Model, frame: &mut ratatui::Frame) {
     let columns_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(
-            iter::repeat(Constraint::Ratio(
-                1,
-                model.columns.len().try_into().unwrap(),
-            ))
-            .take(model.columns.len()), //     [
-                                        //     Constraint::Ratio(1, model.columns.len().try_into().unwrap()),
-                                        //     Constraint::Ratio(1, model.columns.len().try_into().unwrap()),
-                                        //     Constraint::Ratio(1, model.columns.len().try_into().unwrap()),
-                                        // ]
-        )
+        .constraints(std::iter::repeat_n(
+            Constraint::Ratio(1, model.columns.len().try_into().unwrap()),
+            model.columns.len(),
+        ))
         .split(frame.area());
 
     for (column_id, column) in model.columns.iter().enumerate() {
@@ -443,26 +347,26 @@ fn view(model: &mut Model, frame: &mut ratatui::Frame) {
 
         frame.render_stateful_widget(list, column_layout[1], &mut state);
 
-        if model.working_state == WorkingState::ViewingCardDetail {
-            if let Some(card) = model.selected_card() {
-                let block = Block::bordered().title(format!("{} - {}", card.id, card.title));
-                let paragraph = Paragraph::new(&*card.body).block(block);
+        if model.working_state == WorkingState::ViewingCardDetail
+            && let Some(card) = model.selected_card()
+        {
+            let block = Block::bordered().title(format!("{} - {}", card.id, card.title));
+            let paragraph = Paragraph::new(&*card.body).block(block);
 
-                let area = popup_area(frame.area(), 60, 25);
+            let area = popup_area(frame.area(), 60, 25);
 
-                frame.render_widget(ratatui::widgets::Clear, area); //this clears out the background
-                frame.render_widget(paragraph, area);
+            frame.render_widget(ratatui::widgets::Clear, area); //this clears out the background
+            frame.render_widget(paragraph, area);
 
-                /// helper function to create a centered rect using up certain percentage of the available rect `r`
-                fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-                    let vertical =
-                        Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
-                    let horizontal =
-                        Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);
-                    let [area] = vertical.areas(area);
-                    let [area] = horizontal.areas(area);
-                    area
-                }
+            /// helper function to create a centered rect using up certain percentage of the available rect `r`
+            fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+                let vertical =
+                    Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
+                let horizontal =
+                    Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);
+                let [area] = vertical.areas(area);
+                let [area] = horizontal.areas(area);
+                area
             }
         }
     }
@@ -581,11 +485,6 @@ where
                 model.selected.card_index = Some(0);
             }
         }
-        Message::Enter => match model.working_state {
-            WorkingState::ViewingBoard => model.working_state = WorkingState::ViewingCardDetail,
-            WorkingState::ViewingCardDetail => todo!(),
-            WorkingState::MovingCard => todo!(),
-        },
         Message::SwitchToMovingState => {
             model.working_state = WorkingState::MovingCard;
             // select current card
