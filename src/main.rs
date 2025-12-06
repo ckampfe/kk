@@ -42,13 +42,46 @@ impl Repo {
         conn.pragma_update(None, "foreign_keys", "on")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
-        setup_database(&mut conn)?;
+        Self::setup_database(&mut conn)?;
 
         let mut this = Self { conn };
 
         this.insert_board("my great board")?;
 
         Ok(this)
+    }
+
+    fn setup_database(conn: &mut Connection) -> anyhow::Result<()> {
+        conn.execute_batch(
+            "
+            create table if not exists boards (
+                id integer primary key,
+                name text not null,
+                inserted_at timestamp not null default current_timestamp,
+                updated_at timestamp not null default current_timestamp
+            );
+
+            create unique index if not exists boards_name on boards (name);
+
+            create table if not exists cards (
+                id integer primary key,
+                board_id integer not null,
+                title text not null,
+                status text not null default 'Todo',
+                body text not null,
+                doing_at timestamp,
+                done_at timestamp,
+                inserted_at timestamp not null default current_timestamp,
+                updated_at timestamp not null default current_timestamp,
+
+                foreign key(board_id) references boards(id)
+            );
+
+            create index if not exists cards_board_id on cards (board_id);
+            create index if not exists cards_status on cards (status);
+    ",
+        )?;
+        Ok(())
     }
 
     fn insert_board(&mut self, name: &str) -> anyhow::Result<u64> {
@@ -80,13 +113,13 @@ impl Repo {
         Ok(board_id)
     }
 
-    fn insert_card(&self, title: &str, body: &str, board_id: u64) -> anyhow::Result<Card> {
+    fn insert_card(&self, board_id: u64, title: &str, body: &str) -> anyhow::Result<Card> {
         let card = self.conn.query_row(
             "
-        insert into cards (title, body, board_id) values (?, ?, ?)
+        insert into cards (board_id, title, body) values (?, ?, ?)
         returning id
         ",
-            params![title, body, board_id],
+            params![board_id, title, body],
             |row| {
                 Ok(Card {
                     id: row.get(0)?,
@@ -99,19 +132,21 @@ impl Repo {
         Ok(card)
     }
 
-    fn cards_for_column(&self, column_name: &str) -> anyhow::Result<Vec<Card>> {
+    fn cards_for_column(&self, board_id: u64, column_name: &str) -> anyhow::Result<Vec<Card>> {
         let mut s = self.conn.prepare(
             "
-        select
-            id,
-            title,
-            body
-        from cards where status = ?
-        order by id desc;
-        ",
+            select
+                id,
+                title,
+                body
+            from cards where 1
+            and board_id = ?
+            and status = ?
+            order by id desc;
+            ",
         )?;
 
-        let cards_iter = s.query_map([column_name], |row| {
+        let cards_iter = s.query_map(params![board_id, column_name], |row| {
             Ok(Card {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -128,7 +163,7 @@ impl Repo {
         Ok(cards)
     }
 
-    fn update_card(&self, id: u64, title: &str, body: &str) -> anyhow::Result<()> {
+    fn update_card(&self, card_id: u64, title: &str, body: &str) -> anyhow::Result<()> {
         self.conn.execute(
             "
         update cards
@@ -137,7 +172,7 @@ impl Repo {
             body = ?3
         where id = ?1
         ",
-            params![id, title, body],
+            params![card_id, title, body],
         )?;
 
         Ok(())
@@ -159,7 +194,7 @@ impl Repo {
 
 #[derive(Debug)]
 struct Model {
-    current_board: u64,
+    current_board_id: u64,
     columns: Vec<Column>,
     selected: SelectedState,
     working_state: WorkingState,
@@ -183,14 +218,17 @@ impl Model {
     fn new(options: Options) -> anyhow::Result<Self> {
         let repo = Repo::new(options.database_path)?;
 
-        let todo_cards = repo.cards_for_column("Todo")?;
-        let doing_cards = repo.cards_for_column("Doing")?;
-        let done_cards = repo.cards_for_column("Done")?;
-        let archived_cards = repo.cards_for_column("Archived")?;
+        // TODO actually load the most recently used board or default board or something
+        let current_board_id = 1;
+
+        // TODO load cards for the current board
+        let todo_cards = repo.cards_for_column(1, "Todo")?;
+        let doing_cards = repo.cards_for_column(1, "Doing")?;
+        let done_cards = repo.cards_for_column(1, "Done")?;
+        let archived_cards = repo.cards_for_column(1, "Archived")?;
 
         Ok(Self {
-            // TODO
-            current_board: 1,
+            current_board_id,
             columns: vec![
                 Column::new("Todo".to_string(), todo_cards),
                 Column::new("Doing".to_string(), doing_cards),
@@ -256,7 +294,6 @@ enum WorkingState {
     ViewingBoard,
     ViewingCardDetail,
     MovingCard,
-    // Editing,
 }
 
 #[derive(PartialEq)]
@@ -473,7 +510,9 @@ where
                 run_editor(terminal, "Title\n==========\n\nContent goes here")
                 && let Some((title, body)) = parse_raw_card_text(&raw_card_text)
             {
-                let card = model.repo.insert_card(title, body, model.current_board)?;
+                let card = model
+                    .repo
+                    .insert_card(model.current_board_id, title, body)?;
 
                 model.columns[model.selected.column_id].cards.push(card);
 
@@ -629,36 +668,6 @@ fn parse_raw_card_text(raw_card_text: &str) -> Option<(&str, &str)> {
     } else {
         None
     }
-}
-
-fn setup_database(conn: &mut Connection) -> anyhow::Result<()> {
-    conn.execute_batch(
-        "
-    create table if not exists boards (
-        id integer primary key,
-        name text not null,
-        inserted_at timestamp not null default current_timestamp,
-        updated_at timestamp not null default current_timestamp
-    );
-
-    create table if not exists cards (
-        id integer primary key,
-        board_id integer not null,
-        title text not null,
-        status text not null default 'Todo',
-        body text not null,
-        doing_at timestamp,
-        done_at timestamp,
-        inserted_at timestamp not null default current_timestamp,
-        updated_at timestamp not null default current_timestamp,
-
-        foreign key(board_id) references boards(id)
-    );
-
-    create unique index if not exists boards_name on boards (name);
-    ",
-    )?;
-    Ok(())
 }
 
 #[derive(Parser)]
