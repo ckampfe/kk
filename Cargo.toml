@@ -5,10 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4.5.53", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.29"
-directories = "6.0.0"
+directories = "6"
 ratatui = "0.29"
-regex = "1.12.2"
+regex = "1"
 rusqlite = "0.37"
 tempfile = "3"
