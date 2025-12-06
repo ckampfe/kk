@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use clap::Parser;
 use crossterm::ExecutableCommand;
 use crossterm::event::KeyCode;
@@ -203,6 +204,18 @@ struct Model {
     mode: Mode,
     running_state: RunningState,
     repo: Repo,
+    error: Option<String>,
+    internal_event_tx: std::sync::mpsc::Sender<Event>,
+    internal_event_rx: std::sync::mpsc::Receiver<Event>,
+}
+
+enum Event {
+    KeyEvent(crossterm::event::KeyEvent),
+    InternalEvent(InternalEvent),
+}
+
+enum InternalEvent {
+    ClearError,
 }
 
 #[derive(Debug)]
@@ -230,6 +243,8 @@ impl Model {
         let done_cards = repo.cards_for_column(1, "Done")?;
         let archived_cards = repo.cards_for_column(1, "Archived")?;
 
+        let (tx, rx) = std::sync::mpsc::channel();
+
         Ok(Self {
             current_board_id,
             columns: vec![
@@ -245,6 +260,9 @@ impl Model {
             mode: Mode::ViewingBoard,
             running_state: RunningState::Running,
             repo,
+            error: None,
+            internal_event_tx: tx,
+            internal_event_rx: rx,
         })
     }
 
@@ -315,6 +333,7 @@ enum Message {
     EditCard,
     SwitchToViewingBoardState,
     ViewCardDetail,
+    SetError(Option<String>),
 }
 
 fn run_editor<B>(terminal: &mut Terminal<B>, template_text: &str) -> anyhow::Result<String>
@@ -347,13 +366,18 @@ where
 }
 
 fn view(model: &mut Model, frame: &mut ratatui::Frame) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Max(3)])
+        .split(frame.area());
+
     let columns_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(std::iter::repeat_n(
             Constraint::Ratio(1, model.columns.len().try_into().unwrap()),
             model.columns.len(),
         ))
-        .split(frame.area());
+        .split(layout[0]);
 
     for (column_id, column) in model.columns.iter().enumerate() {
         let column_layout = Layout::default()
@@ -412,47 +436,77 @@ fn view(model: &mut Model, frame: &mut ratatui::Frame) {
             }
         }
     }
+
+    let modeline = {
+        let modeline_block =
+            Block::new().borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT);
+
+        let mut modeline_text = (match model.mode {
+            Mode::ViewingBoard => "VIEWING BOARD",
+            Mode::ViewingCardDetail => "VIEWING CARD",
+            Mode::MovingCard => "MOVING CARD",
+        })
+        .to_string();
+
+        if let Some(e) = &model.error {
+            modeline_text.push_str(" - Error: ");
+            modeline_text.push_str(&e.replace("\n", " "));
+        }
+
+        Paragraph::new(modeline_text).block(modeline_block)
+    };
+
+    frame.render_widget(modeline, layout[1]);
 }
 
 /// Convert Event to Message
 ///
 /// We don't need to pass in a `model` to this function in this example
 /// but you might need it as your project evolves
-fn handle_event(model: &Model) -> anyhow::Result<Option<Message>> {
+fn receive_event(model: &Model) -> anyhow::Result<Option<Message>> {
     if crossterm::event::poll(Duration::from_millis(250))?
         && let crossterm::event::Event::Key(key) = crossterm::event::read()?
         && key.kind == crossterm::event::KeyEventKind::Press
     {
-        return Ok(handle_key(key, model));
+        return Ok(handle_event(Event::KeyEvent(key), model));
     }
+
+    if let Ok(event) = model.internal_event_rx.try_recv() {
+        return Ok(handle_event(event, model));
+    }
+
     Ok(None)
 }
 
-fn handle_key(key: crossterm::event::KeyEvent, model: &Model) -> Option<Message> {
-    match model.mode {
-        Mode::ViewingBoard => match key.code {
-            KeyCode::Char('h') => Some(Message::NavigateLeft),
-            KeyCode::Char('j') => Some(Message::NavigateDown),
-            KeyCode::Char('k') => Some(Message::NavigateUp),
-            KeyCode::Char('l') => Some(Message::NavigateRight),
-            KeyCode::Char('q') => Some(Message::Quit),
-            KeyCode::Char('m') => Some(Message::SwitchToMovingState),
-            KeyCode::Char('n') => Some(Message::NewCard),
-            KeyCode::Char('e') => Some(Message::EditCard),
-            KeyCode::Enter => Some(Message::ViewCardDetail),
-            _ => None,
+fn handle_event(event: Event, model: &Model) -> Option<Message> {
+    match event {
+        Event::InternalEvent(e) => match e {
+            InternalEvent::ClearError => Some(Message::SetError(None)),
         },
-        Mode::MovingCard => match key.code {
-            KeyCode::Char('h') => Some(Message::MoveCardLeft),
-            KeyCode::Char('l') => Some(Message::MoveCardRight),
-            KeyCode::Char('q') => Some(Message::Quit),
-            KeyCode::Char('m') => Some(Message::SwitchToViewingBoardState),
-            _ => None,
-        },
-        Mode::ViewingCardDetail => match key.code {
-            KeyCode::Enter => Some(Message::SwitchToViewingBoardState),
-            KeyCode::Esc => Some(Message::SwitchToViewingBoardState),
-            _ => None,
+        Event::KeyEvent(key) => match model.mode {
+            Mode::ViewingBoard => match key.code {
+                KeyCode::Char('h') => Some(Message::NavigateLeft),
+                KeyCode::Char('j') => Some(Message::NavigateDown),
+                KeyCode::Char('k') => Some(Message::NavigateUp),
+                KeyCode::Char('l') => Some(Message::NavigateRight),
+                KeyCode::Char('q') => Some(Message::Quit),
+                KeyCode::Char('m') => Some(Message::SwitchToMovingState),
+                KeyCode::Char('n') => Some(Message::NewCard),
+                KeyCode::Char('e') => Some(Message::EditCard),
+                KeyCode::Enter => Some(Message::ViewCardDetail),
+                _ => None,
+            },
+            Mode::MovingCard => match key.code {
+                KeyCode::Char('h') => Some(Message::MoveCardLeft),
+                KeyCode::Char('l') => Some(Message::MoveCardRight),
+                KeyCode::Char('q') => Some(Message::Quit),
+                KeyCode::Char('m') | KeyCode::Enter => Some(Message::SwitchToViewingBoardState),
+                _ => None,
+            },
+            Mode::ViewingCardDetail => match key.code {
+                KeyCode::Enter | KeyCode::Esc => Some(Message::SwitchToViewingBoardState),
+                _ => None,
+            },
         },
     }
 }
@@ -484,23 +538,21 @@ where
         }
         Message::NavigateRight => navigate_right(model),
         Message::NewCard => {
-            if let Ok(raw_card_text) =
-                run_editor(terminal, "Title\n==========\n\nContent goes here")
-                && let Some((title, body)) = parse_raw_card_text(&raw_card_text)
-            {
-                let card = model
-                    .repo
-                    .insert_card(model.current_board_id, title, body)?;
+            let raw_card_text = run_editor(terminal, "Title\n==========\n\nContent goes here")?;
+            let (title, body) = parse_raw_card_text(&raw_card_text)?;
 
-                model.columns[model.selected.column_id].cards.push(card);
+            let card = model
+                .repo
+                .insert_card(model.current_board_id, title, body)?;
 
-                model.columns[model.selected.column_id]
-                    .cards
-                    .sort_unstable_by(|a, b| b.id.cmp(&a.id));
+            model.columns[model.selected.column_id].cards.push(card);
 
-                model.mode = Mode::ViewingBoard;
-                model.selected.card_index = Some(0);
-            }
+            model.columns[model.selected.column_id]
+                .cards
+                .sort_unstable_by(|a, b| b.id.cmp(&a.id));
+
+            model.mode = Mode::ViewingBoard;
+            model.selected.card_index = Some(0);
         }
         Message::SwitchToMovingState => {
             model.mode = Mode::MovingCard;
@@ -516,20 +568,26 @@ where
 
                 let card_for_editor = format!("{}\n==========\n\n{}", card.title, card.body);
 
-                if let Ok(raw_card_text) = run_editor(terminal, &card_for_editor)
-                    && let Some((title, body)) = parse_raw_card_text(&raw_card_text)
-                {
-                    model.repo.update_card(card.id, title, body)?;
-                    card.title = title.to_string();
-                    card.body = body.to_string();
-                } else {
-                    panic!("could not update")
-                };
+                let raw_card_text = run_editor(terminal, &card_for_editor)?;
+
+                let (title, body) = parse_raw_card_text(&raw_card_text)?;
+
+                model.repo.update_card(card.id, title, body)?;
+                card.title = title.to_string();
+                card.body = body.to_string();
             }
 
             model.mode = Mode::ViewingBoard;
         }
         Message::SwitchToViewingBoardState => model.mode = Mode::ViewingBoard,
+        Message::SetError(e) => {
+            model.error = e;
+            let internal_event_tx = model.internal_event_tx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                let _ = internal_event_tx.send(Event::InternalEvent(InternalEvent::ClearError));
+            });
+        }
     };
 
     Ok(None)
@@ -633,7 +691,7 @@ fn move_selected_card_right(model: &mut Model) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_raw_card_text(raw_card_text: &str) -> Option<(&str, &str)> {
+fn parse_raw_card_text(raw_card_text: &str) -> anyhow::Result<(&str, &str)> {
     let card_regex = Regex::new(r#"(?s)(?<title>[^=\n]+)\n=+\n\n(?<body>.*)"#).unwrap();
 
     let m = card_regex.captures(raw_card_text);
@@ -642,9 +700,9 @@ fn parse_raw_card_text(raw_card_text: &str) -> Option<(&str, &str)> {
         && let Some(title) = captures.name("title")
         && let Some(body) = captures.name("body")
     {
-        Some((title.as_str(), body.as_str()))
+        Ok((title.as_str(), body.as_str()))
     } else {
-        None
+        Err(anyhow!("could not parse raw card text"))
     }
 }
 
@@ -671,11 +729,14 @@ fn main() -> anyhow::Result<()> {
         terminal.draw(|f| view(&mut model, f))?;
 
         // Handle events and map to a Message
-        let mut current_msg = handle_event(&model)?;
+        let mut current_msg = receive_event(&model)?;
 
         // Process updates as long as they return a non-None message
         while let Some(m) = current_msg {
-            current_msg = update(&mut model, m, &mut terminal)?;
+            match update(&mut model, m, &mut terminal) {
+                Ok(m) => current_msg = m,
+                Err(e) => current_msg = Some(Message::SetError(Some(e.to_string()))),
+            }
         }
     }
 
