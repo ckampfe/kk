@@ -8,7 +8,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use regex::Regex;
 use rusqlite::{Connection, params};
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::fmt::Display;
 use std::io::Write;
 use std::iter;
