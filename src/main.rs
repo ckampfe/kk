@@ -519,7 +519,6 @@ where
 }
 
 fn navigate_left(model: &mut Model) {
-    // model.selected.column_id = model.selected.column_id.saturating_add(1);
     let possible_left_column_id = model.selected.column_id.saturating_sub(1);
 
     if let Some(left_column) = model.columns.get(possible_left_column_id)
@@ -528,11 +527,6 @@ fn navigate_left(model: &mut Model) {
     {
         model.selected.column_id = possible_left_column_id;
 
-        // if left_column.cards.is_empty() {
-        //     model.selected.card_index = None
-        // } else if left_column.cards.len() < model.selected.card_index.unwrap() {
-        //     model.selected.card_index = Some(left_column.cards.len().saturating_add(1));
-        // }
         if left_column.cards.is_empty() {
             model.selected.card_index = None
         } else {
@@ -543,7 +537,6 @@ fn navigate_left(model: &mut Model) {
                     .card_index
                     .unwrap_or(left_column.cards.len().saturating_sub(1)),
             ))
-            // model.selected.card_index = Some(left_column.cards.len().saturating_add(1));
         }
     }
 }
@@ -556,11 +549,6 @@ fn navigate_right(model: &mut Model) {
     {
         model.selected.column_id = possible_right_column_id;
 
-        // if right_column.cards.is_empty() {
-        //     model.selected.card_index = None
-        // } else if right_column.cards.len() < model.selected.card_index.unwrap() {
-        //     model.selected.card_index = Some(right_column.cards.len().saturating_add(1));
-        // }
         if right_column.cards.is_empty() {
             model.selected.card_index = None
         } else {
@@ -571,7 +559,6 @@ fn navigate_right(model: &mut Model) {
                     .card_index
                     .unwrap_or(right_column.cards.len().saturating_sub(1)),
             ))
-            // model.selected.card_index = Some(right_column.cards.len().saturating_add(1));
         }
     }
 }
@@ -590,14 +577,8 @@ fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
                 .repo
                 .set_card_status(card.id, &model.columns[left_column_id].name)?;
 
-            // model.columns[left_column_id].cards.push(card);
             model.columns[left_column_id].cards.insert(0, card);
 
-            // TODO fix
-            // model.selected.card_index = model
-            //     .selected
-            //     .card_index
-            //     .map(|_i| model.columns[left_column_id].cards.len().saturating_sub(1));
             model.selected.card_index = Some(0);
 
             model.selected.column_id = left_column_id;
@@ -624,19 +605,9 @@ fn move_selected_card_right(model: &mut Model) -> anyhow::Result<()> {
                 .repo
                 .set_card_status(card.id, &model.columns[right_column_id].name)?;
 
-            // model.columns[right_column_id].cards.push(card);
             model.columns[right_column_id].cards.insert(0, card);
 
-            // TODO fix
-            // model.selected.card_index =
-            //     Some(model.columns[right_column_id].cards.len().saturating_sub(1));
-
             model.selected.card_index = Some(0);
-
-            // model.selected.card_index = model
-            //     .selected
-            //     .card_index
-            //     .map(|_i| model.columns[right_column_id].cards.len().saturating_sub(1));
 
             model.selected.column_id = right_column_id;
         }
@@ -703,32 +674,6 @@ fn main() -> anyhow::Result<()> {
     let options = Options::parse();
 
     let mut model = Model::new(options)?;
-
-    // model.todo_cards.push(Card {
-    //     id: 1,
-    //     title: "make the corners rounder".to_string(),
-    //     body:
-    //         "in order to get more customers we need corners that are rounder\nthis is the only way"
-    //             .to_string(),
-    // });
-
-    // model.todo_cards.push(Card {
-    //     id: 2,
-    //     title: "it should be faster".to_string(),
-    //     body: "the customers are not happy that it is slow".to_string(),
-    // });
-
-    // model.doing_cards.push(Card {
-    //     id: 4,
-    //     title: "making it better".to_string(),
-    //     body: "it needs to be better".to_string(),
-    // });
-
-    // model.done_cards.push(Card {
-    //     id: 3,
-    //     title: "make it popular".to_string(),
-    //     body: "spread the word far and wide".to_string(),
-    // });
 
     if !model.columns[0].cards.is_empty() {
         model.selected.card_index = Some(0);
