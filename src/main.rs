@@ -485,10 +485,10 @@ fn handle_event(event: Event, model: &Model) -> Option<Message> {
         },
         Event::KeyEvent(key) => match model.mode {
             Mode::ViewingBoard => match key.code {
-                KeyCode::Char('h') => Some(Message::NavigateLeft),
-                KeyCode::Char('j') => Some(Message::NavigateDown),
-                KeyCode::Char('k') => Some(Message::NavigateUp),
-                KeyCode::Char('l') => Some(Message::NavigateRight),
+                KeyCode::Char('h') | KeyCode::Left => Some(Message::NavigateLeft),
+                KeyCode::Char('j') | KeyCode::Down => Some(Message::NavigateDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Message::NavigateUp),
+                KeyCode::Char('l') | KeyCode::Right => Some(Message::NavigateRight),
                 KeyCode::Char('q') => Some(Message::Quit),
                 KeyCode::Char('m') => Some(Message::SwitchToMovingState),
                 KeyCode::Char('n') => Some(Message::NewCard),
