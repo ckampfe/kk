@@ -547,14 +547,15 @@ where
                 .repo
                 .insert_card(model.current_board_id, title, body)?;
 
+            model.mode = Mode::ViewingBoard;
+            model.selected.column_id = 0;
+            model.selected.card_index = Some(0);
+
             model.columns[model.selected.column_id].cards.push(card);
 
             model.columns[model.selected.column_id]
                 .cards
                 .sort_unstable_by(|a, b| b.id.cmp(&a.id));
-
-            model.mode = Mode::ViewingBoard;
-            model.selected.card_index = Some(0);
         }
         Message::SwitchToMovingState => {
             model.mode = Mode::MovingCard;
