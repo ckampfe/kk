@@ -283,7 +283,7 @@ impl Model {
     // }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 struct SelectedState {
     column_id: usize,
     card_index: Option<usize>,
@@ -295,7 +295,7 @@ impl Display for Column {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 struct Card {
     id: u64,
     title: String,
@@ -317,7 +317,7 @@ enum Mode {
     MovingCard,
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Message {
     NavigateLeft,
     NavigateDown,
@@ -325,14 +325,14 @@ enum Message {
     NavigateRight,
     Quit,
     NewCard,
-    SwitchToMovingState,
+    MoveCardMode,
     MoveCardLeft,
     // MoveCardDown,
     // MoveCardUp,
     MoveCardRight,
     EditCard,
-    SwitchToViewingBoardState,
-    ViewCardDetail,
+    ViewBoardMode,
+    ViewCardDetailMode,
     SetError(Option<String>),
 }
 
@@ -490,23 +490,21 @@ fn handle_event(event: Event, model: &Model) -> Option<Message> {
                 KeyCode::Char('k') | KeyCode::Up => Some(Message::NavigateUp),
                 KeyCode::Char('l') | KeyCode::Right => Some(Message::NavigateRight),
                 KeyCode::Char('q') => Some(Message::Quit),
-                KeyCode::Char('m') => Some(Message::SwitchToMovingState),
+                KeyCode::Char('m') => Some(Message::MoveCardMode),
                 KeyCode::Char('n') => Some(Message::NewCard),
                 KeyCode::Char('e') => Some(Message::EditCard),
-                KeyCode::Enter => Some(Message::ViewCardDetail),
+                KeyCode::Enter => Some(Message::ViewCardDetailMode),
                 _ => None,
             },
             Mode::MovingCard => match key.code {
                 KeyCode::Char('h') => Some(Message::MoveCardLeft),
                 KeyCode::Char('l') => Some(Message::MoveCardRight),
                 KeyCode::Char('q') => Some(Message::Quit),
-                KeyCode::Char('m') | KeyCode::Enter | KeyCode::Esc => {
-                    Some(Message::SwitchToViewingBoardState)
-                }
+                KeyCode::Char('m') | KeyCode::Enter | KeyCode::Esc => Some(Message::ViewBoardMode),
                 _ => None,
             },
             Mode::ViewingCardDetail => match key.code {
-                KeyCode::Enter | KeyCode::Esc => Some(Message::SwitchToViewingBoardState),
+                KeyCode::Enter | KeyCode::Esc => Some(Message::ViewBoardMode),
                 _ => None,
             },
         },
@@ -519,6 +517,24 @@ fn update<B>(
     terminal: &mut Terminal<B>,
 ) -> anyhow::Result<Option<Message>>
 where
+    B: Backend,
+{
+    update_with_run_editor_fn(model, msg, terminal, run_editor)
+}
+
+/// this exists only so we can mock out the run_editor function,
+/// which in the real program actually opens the user's editor.
+/// we can't do this in tests, so we need to mock it out
+/// with a function that just returns whatever data
+/// we tell it to, depending on the desired test condition
+fn update_with_run_editor_fn<F, B>(
+    model: &mut Model,
+    msg: Message,
+    terminal: &mut Terminal<B>,
+    run_editor_fn: F,
+) -> anyhow::Result<Option<Message>>
+where
+    F: Fn(&mut Terminal<B>, &str) -> anyhow::Result<String>,
     B: Backend,
 {
     match msg {
@@ -540,7 +556,7 @@ where
         }
         Message::NavigateRight => navigate_right(model),
         Message::NewCard => {
-            let raw_card_text = run_editor(terminal, "Title\n==========\n\nContent goes here")?;
+            let raw_card_text = run_editor_fn(terminal, "Title\n==========\n\nContent goes here")?;
             let (title, body) = parse_raw_card_text(&raw_card_text)?;
 
             let card = model
@@ -557,21 +573,17 @@ where
                 .cards
                 .sort_unstable_by(|a, b| b.id.cmp(&a.id));
         }
-        Message::SwitchToMovingState => {
-            model.mode = Mode::MovingCard;
-            // select current card
-            // cause moves to move the card between columns
-        }
+        Message::MoveCardMode => model.mode = Mode::MovingCard,
         Message::MoveCardLeft => move_selected_card_left(model)?,
         Message::MoveCardRight => move_selected_card_right(model)?,
-        Message::ViewCardDetail => model.mode = Mode::ViewingCardDetail,
+        Message::ViewCardDetailMode => model.mode = Mode::ViewingCardDetail,
         Message::EditCard => {
             if let Some(card_index) = model.selected.card_index {
                 let card = &mut model.columns[model.selected.column_id].cards[card_index];
 
                 let card_for_editor = format!("{}\n==========\n\n{}", card.title, card.body);
 
-                let raw_card_text = run_editor(terminal, &card_for_editor)?;
+                let raw_card_text = run_editor_fn(terminal, &card_for_editor)?;
 
                 let (title, body) = parse_raw_card_text(&raw_card_text)?;
 
@@ -582,7 +594,7 @@ where
 
             model.mode = Mode::ViewingBoard;
         }
-        Message::SwitchToViewingBoardState => model.mode = Mode::ViewingBoard,
+        Message::ViewBoardMode => model.mode = Mode::ViewingBoard,
         Message::SetError(e) => {
             model.error = e;
             let internal_event_tx = model.internal_event_tx.clone();
@@ -746,4 +758,694 @@ fn main() -> anyhow::Result<()> {
     ratatui::restore();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Model, Options, RunningState, update};
+
+    mod new_card {
+        use crate::{Card, Column, Model, Options, RunningState, update_with_run_editor_fn};
+        use ratatui::Terminal;
+
+        #[test]
+        fn with_bad_input() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![Column {
+                name: "Todo".to_string(),
+                cards: vec![],
+            }];
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            let update_result = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns invalid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("bad input".to_string())
+                },
+            );
+
+            assert!(update_result.is_err());
+
+            assert_eq!(model.running_state, RunningState::Running);
+        }
+
+        #[test]
+        fn with_valid_input() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![Column {
+                name: "Todo".to_string(),
+                cards: vec![],
+            }];
+
+            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.card_index, None);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            let update_result = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns valid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Valid Title\n==========\n\nValid card body".to_string())
+                },
+            );
+
+            assert!(update_result.is_ok());
+
+            assert_eq!(
+                model.columns[0].cards,
+                vec![Card {
+                    id: 1,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string()
+                }]
+            );
+
+            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.card_index, Some(0));
+
+            assert_eq!(
+                model.repo.cards_for_column(1, "Todo").unwrap(),
+                vec![Card {
+                    id: 1,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string()
+                }]
+            );
+
+            assert_eq!(model.running_state, RunningState::Running);
+        }
+    }
+
+    mod edit_card {
+        use crate::{Card, Model, Options, RunningState, update_with_run_editor_fn};
+        use ratatui::Terminal;
+
+        #[test]
+        fn with_bad_input() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            let update_result = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns valid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Valid Title\n==========\n\nValid card body".to_string())
+                },
+            );
+
+            assert!(update_result.is_ok());
+
+            model.selected.column_id = 0;
+            model.selected.card_index = Some(0);
+
+            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.card_index, Some(0));
+
+            let update_result = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::EditCard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns invalid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Bad input".to_string())
+                },
+            );
+
+            assert!(update_result.is_err());
+
+            assert_eq!(
+                model.columns[0].cards,
+                vec![Card {
+                    id: 1,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string()
+                }]
+            );
+
+            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.card_index, Some(0));
+
+            assert_eq!(
+                model.repo.cards_for_column(1, "Todo").unwrap(),
+                vec![Card {
+                    id: 1,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string()
+                }]
+            );
+
+            assert_eq!(model.running_state, RunningState::Running);
+        }
+
+        #[test]
+        fn with_valid_input() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            let update_result = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns valid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Valid Title\n==========\n\nValid card body".to_string())
+                },
+            );
+
+            assert!(update_result.is_ok());
+
+            model.selected.column_id = 0;
+            model.selected.card_index = Some(0);
+
+            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.card_index, Some(0));
+
+            let update_result = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::EditCard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns valid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Valid Title\n==========\n\nValid card body".to_string())
+                },
+            );
+
+            assert!(update_result.is_ok());
+
+            assert_eq!(
+                model.columns[0].cards,
+                vec![Card {
+                    id: 1,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string()
+                }]
+            );
+
+            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.card_index, Some(0));
+
+            assert_eq!(
+                model.repo.cards_for_column(1, "Todo").unwrap(),
+                vec![Card {
+                    id: 1,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string()
+                }]
+            );
+
+            assert_eq!(model.running_state, RunningState::Running);
+        }
+    }
+
+    #[test]
+    fn update_quit() {
+        let mut model = Model::new(Options {
+            database_path: Some(":memory:".into()),
+        })
+        .unwrap();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+        update(&mut model, crate::Message::Quit, &mut terminal).unwrap();
+
+        assert_eq!(model.running_state, RunningState::Done);
+    }
+
+    mod navigate_left {
+        use crate::{Card, Column, Model, Options, RunningState, SelectedState, update};
+
+        #[test]
+        fn when_left() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateLeft, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 0,
+                    card_index: None
+                }
+            );
+        }
+
+        #[test]
+        fn when_right_with_card() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![
+                Column {
+                    name: "Todo".to_string(),
+                    cards: vec![Card {
+                        id: 1,
+                        title: "great card".to_string(),
+                        body: "great body".to_string(),
+                    }],
+                },
+                Column {
+                    name: "Doing".to_string(),
+                    cards: vec![Card {
+                        id: 2,
+                        title: "title 2".to_string(),
+                        body: "body 2".to_string(),
+                    }],
+                },
+            ];
+            model.selected.column_id = 1;
+            model.selected.card_index = Some(0);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateLeft, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 0,
+                    card_index: Some(0)
+                }
+            );
+        }
+
+        #[test]
+        fn when_right_without_card() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![
+                Column {
+                    name: "Todo".to_string(),
+                    cards: vec![],
+                },
+                Column {
+                    name: "Doing".to_string(),
+                    cards: vec![Card {
+                        id: 2,
+                        title: "title 2".to_string(),
+                        body: "body 2".to_string(),
+                    }],
+                },
+            ];
+            model.selected.column_id = 1;
+            model.selected.card_index = Some(0);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateLeft, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 1,
+                    card_index: Some(0)
+                }
+            );
+        }
+    }
+
+    mod navigate_right {
+        use crate::{Card, Column, Model, Options, RunningState, SelectedState, update};
+
+        #[test]
+        fn when_right() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateRight, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 0,
+                    card_index: None
+                }
+            );
+        }
+
+        #[test]
+        fn when_left_with_card() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![
+                Column {
+                    name: "Todo".to_string(),
+                    cards: vec![Card {
+                        id: 1,
+                        title: "great card".to_string(),
+                        body: "great body".to_string(),
+                    }],
+                },
+                Column {
+                    name: "Doing".to_string(),
+                    cards: vec![Card {
+                        id: 2,
+                        title: "title 2".to_string(),
+                        body: "body 2".to_string(),
+                    }],
+                },
+            ];
+            model.selected.column_id = 0;
+            model.selected.card_index = Some(0);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateRight, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 1,
+                    card_index: Some(0)
+                }
+            );
+        }
+
+        #[test]
+        fn when_left_without_card() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![
+                Column {
+                    name: "Todo".to_string(),
+                    cards: vec![Card {
+                        id: 2,
+                        title: "title 2".to_string(),
+                        body: "body 2".to_string(),
+                    }],
+                },
+                Column {
+                    name: "Doing".to_string(),
+                    cards: vec![],
+                },
+            ];
+            model.selected.column_id = 1;
+            model.selected.card_index = Some(0);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateRight, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 1,
+                    card_index: Some(0)
+                }
+            );
+        }
+    }
+
+    mod navigate_down {
+        use crate::{Card, Column, Model, Options, RunningState, SelectedState, update};
+
+        #[test]
+        fn when_length_is_one() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![Column {
+                name: "Todo".to_string(),
+                cards: vec![Card {
+                    id: 2,
+                    title: "title 2".to_string(),
+                    body: "body 2".to_string(),
+                }],
+            }];
+            model.selected.column_id = 0;
+            model.selected.card_index = Some(0);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateDown, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 0,
+                    card_index: Some(0)
+                }
+            );
+        }
+
+        #[test]
+        fn when_length_is_greater_than_one() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![Column {
+                name: "Todo".to_string(),
+                cards: vec![
+                    Card {
+                        id: 1,
+                        title: "title 1".to_string(),
+                        body: "body 1".to_string(),
+                    },
+                    Card {
+                        id: 2,
+                        title: "title 2".to_string(),
+                        body: "body 2".to_string(),
+                    },
+                ],
+            }];
+            model.selected.column_id = 0;
+            model.selected.card_index = Some(0);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateDown, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 0,
+                    card_index: Some(1)
+                }
+            );
+        }
+    }
+
+    mod navigate_up {
+        use crate::{Card, Column, Model, Options, RunningState, SelectedState, update};
+
+        #[test]
+        fn when_length_is_one() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![Column {
+                name: "Todo".to_string(),
+                cards: vec![Card {
+                    id: 2,
+                    title: "title 2".to_string(),
+                    body: "body 2".to_string(),
+                }],
+            }];
+            model.selected.column_id = 0;
+            model.selected.card_index = Some(0);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateUp, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 0,
+                    card_index: Some(0)
+                }
+            );
+        }
+
+        #[test]
+        fn when_length_is_greater_than_one() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.columns = vec![Column {
+                name: "Todo".to_string(),
+                cards: vec![
+                    Card {
+                        id: 1,
+                        title: "title 1".to_string(),
+                        body: "body 1".to_string(),
+                    },
+                    Card {
+                        id: 2,
+                        title: "title 2".to_string(),
+                        body: "body 2".to_string(),
+                    },
+                ],
+            }];
+            model.selected.column_id = 0;
+            model.selected.card_index = Some(1);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::NavigateUp, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(
+                model.selected,
+                SelectedState {
+                    column_id: 0,
+                    card_index: Some(0)
+                }
+            );
+        }
+    }
+
+    mod switch_to_moving_mode {
+        use crate::{Mode, Model, Options, RunningState, update};
+
+        #[test]
+        fn switches() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            assert_eq!(model.mode, Mode::ViewingBoard);
+
+            update(&mut model, crate::Message::MoveCardMode, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(model.mode, Mode::MovingCard);
+        }
+    }
+
+    mod switch_to_view_card_detail_mode {
+        use crate::{Mode, Model, Options, RunningState, update};
+
+        #[test]
+        fn switches() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            assert_eq!(model.mode, Mode::ViewingBoard);
+
+            update(
+                &mut model,
+                crate::Message::ViewCardDetailMode,
+                &mut terminal,
+            )
+            .unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(model.mode, Mode::ViewingCardDetail);
+        }
+    }
+
+    mod switch_to_viewing_board_mode {
+        use crate::{Mode, Model, Options, RunningState, update};
+
+        #[test]
+        fn switches() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            model.mode = Mode::ViewingCardDetail;
+
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(model.mode, Mode::ViewingBoard);
+
+            model.mode = Mode::MovingCard;
+
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(model.mode, Mode::ViewingBoard);
+        }
+    }
 }
