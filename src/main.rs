@@ -1,3 +1,14 @@
+// TODO typestate pattern, like:
+// Model<Mode> where Mode == ViewingBoard, MovingCard, ViewingBoards, etc.
+// or have different Model structs entirely, where we transition
+// from ViewingBoardModel to ViewingBoardsModel, etc.
+// and only allow orderly state transitions
+
+// - you're just not going to have more than a few columns
+// - those columns may have many cards
+// - Vec<Column>?
+// - Column { name: String, Vec<Card> }
+
 use anyhow::anyhow;
 use clap::Parser;
 use crossterm::ExecutableCommand;
@@ -8,13 +19,301 @@ use ratatui::prelude::Backend;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use regex::Regex;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::cmp::min;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
+
+#[derive(Debug)]
+struct BoardMeta {
+    id: u64,
+    name: String,
+}
+
+#[derive(Debug)]
+struct Model {
+    board_metas: Vec<BoardMeta>,
+    // columns: Vec<Column>,
+    board: Option<Board>,
+    selected: SelectedState,
+    mode: Mode,
+    running_state: RunningState,
+    repo: Repo,
+    error: Option<String>,
+    internal_event_tx: std::sync::mpsc::Sender<Event>,
+    internal_event_rx: std::sync::mpsc::Receiver<Event>,
+}
+
+impl Model {
+    fn new(options: Options) -> anyhow::Result<Self> {
+        let repo = Repo::new(options.database_path)?;
+
+        // TODO load cards for the current board
+        // let todo_cards = repo.cards_for_column(1, "Todo")?;
+        // let doing_cards = repo.cards_for_column(1, "Doing")?;
+        // let done_cards = repo.cards_for_column(1, "Done")?;
+        // let archived_cards = repo.cards_for_column(1, "Archived")?;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let board = repo.load_board(1)?;
+
+        Ok(Self {
+            board_metas: vec![],
+            board: Some(board),
+            // columns: vec![
+            //     Column::new("Todo".to_string(), todo_cards),
+            //     Column::new("Doing".to_string(), doing_cards),
+            //     Column::new("Done".to_string(), done_cards),
+            //     Column::new("Archived".to_string(), archived_cards),
+            // ],
+            selected: SelectedState {
+                // TODO actually load the most recently used board or default board or something
+                board_id: 1,
+                // TODO actually load the most recently used board or default board or something
+                board_index: None,
+                column_index: 0,
+                card_index: None,
+            },
+            mode: Mode::ViewingBoard,
+            running_state: RunningState::Running,
+            repo,
+            error: None,
+            internal_event_tx: tx,
+            internal_event_rx: rx,
+        })
+    }
+
+    fn selected_column_mut(&mut self) -> &mut Column {
+        let board = self.board.as_mut().unwrap();
+        // let column_name = &board.columns_order[self.selected.column_id];
+        // let
+        // board.columns.get_mut(column_name).unwrap()
+        &mut board.columns[self.selected.column_index]
+    }
+
+    fn add_card_to_selected_column(&mut self, card: Card) {
+        let current_column = self.selected_column_mut();
+        current_column.cards.push(card);
+        current_column
+            .cards
+            .sort_unstable_by(|a, b| b.id.cmp(&a.id));
+    }
+
+    fn selected_card(&self) -> Option<&Card> {
+        // if let Some(card_index) = self.selected.card_index {
+        //     Some(&self.columns[self.selected.column_id].cards[card_index])
+        // } else {
+        //     None
+        // }
+        if let Some(card_index) = self.selected.card_index {
+            // let cards = self.selected_column().cards;
+            // Some(&cards[card_index]
+            Some(&self.selected_column().cards[card_index])
+        } else {
+            None
+        }
+    }
+
+    fn selected_card_mut(&mut self) -> Option<&mut Card> {
+        // if let Some(card_index) = self.selected.card_index {
+        //     Some(&self.columns[self.selected.column_id].cards[card_index])
+        // } else {
+        //     None
+        // }
+        if let Some(card_index) = self.selected.card_index {
+            // let cards = self.selected_column_mut();
+            // cards.get_mut(card_index)
+            Some(&mut self.selected_column_mut().cards[card_index])
+        } else {
+            None
+        }
+    }
+
+    //    // if let Some(card_index) = model.selected.card_index {
+    //                 if let Some(card) = model.selected_card_mut() {
+    //                     // let card = model.selected_card_mut().unwrap();
+
+    //                     let card_for_editor =
+    //                         format!("{}\n==========\n\n{}", card.title, card.body);
+
+    //                     let raw_card_text = run_editor_fn(terminal, &card_for_editor)?;
+
+    //                     let (title, body) = parse_raw_card_text(&raw_card_text)?;
+
+    //                     model.repo.update_card(card.id, title, body)?;
+    //                     card.title = title.to_string();
+    //                     card.body = body.to_string();
+    //                 }
+
+    //                 model.mode = Mode::ViewingBoard;
+    // fn update_selected_card(&self, title: &str, body: &str, run) {
+    //     if let Some(card_index) = self.selected.card_index {
+    //         let card = self.selected_card().unwrap();
+
+    //         let card_for_editor = format!("{}\n==========\n\n{}", card.title, card.body);
+
+    //         let raw_card_text = run_editor_fn(terminal, &card_for_editor)?;
+
+    //         let (title, body) = parse_raw_card_text(&raw_card_text)?;
+
+    //         model.repo.update_card(card.id, title, body)?;
+    //         card.title = title.to_string();
+    //         card.body = body.to_string();
+    //     }
+    // }
+
+    fn selected_column(&self) -> &Column {
+        // &self.columns[self.selected.column_id].cards
+        let board = self.board.as_ref().unwrap();
+        // let current_column = &board.columns_order[self.selected.column_id];
+        // &board.columns[current_column]
+        &board.columns[self.selected.column_index]
+    }
+
+    fn navigate_left(&mut self) {
+        // 1. change selected column to i - 1 if it doesn't start at 0
+        // 2. change selected card index to same index or last index
+
+        if let Some(board) = &mut self.board {
+            let left_column_id = self.selected.column_index.saturating_sub(1);
+            if left_column_id != self.selected.column_index {
+                if let Some(left_column) = board.columns.get(left_column_id)
+                    && !left_column.cards.is_empty()
+                {
+                    let left_column_len = left_column.cards.len();
+
+                    self.selected.column_index = left_column_id;
+
+                    self.selected.card_index = Some(min(
+                        left_column_len.saturating_sub(1),
+                        self.selected
+                            .card_index
+                            .unwrap_or(left_column_len.saturating_sub(1)),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn navigate_right(&mut self) {
+        // 1. change selected column to i - 1 if it doesn't start at 0
+        // 2. change selected card index to same index or last index
+
+        if let Some(board) = &mut self.board {
+            let right_column_id = self.selected.column_index.saturating_add(1);
+            if right_column_id != self.selected.column_index {
+                if let Some(right_column) = board.columns.get(right_column_id) {
+                    let right_column_len = right_column.cards.len();
+
+                    self.selected.column_index = right_column_id;
+
+                    self.selected.card_index = Some(min(
+                        right_column_len.saturating_sub(1),
+                        self.selected
+                            .card_index
+                            .unwrap_or(right_column_len.saturating_sub(1)),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn load_selected_board(&mut self) -> anyhow::Result<()> {
+        self.board = Some(self.repo.load_board(self.selected.board_id)?);
+        Ok(())
+    }
+
+    // fn navigate_left(&mut self) {
+    //     let possible_left_column_id = self.selected.column_id.saturating_sub(1);
+
+    //     if let Some(left_column) = self.column_left_of_selected_column_mut()
+    //         && !left_column.is_empty()
+    //     {
+    //         self.selected.column_id = possible_left_column_id;
+
+    //         self.selected.card_index = Some(min(
+    //             left_column.len().saturating_sub(1),
+    //             self.selected
+    //                 .card_index
+    //                 .unwrap_or(left_column.len().saturating_sub(1)),
+    //         ));
+    //     }
+    // }
+
+    // fn column_left_of_selected_column_mut(&mut self) -> Option<&mut Vec<Card>> {
+    //     let board = self.board.as_mut().unwrap();
+
+    //     let left_idx = self.selected.column_id.saturating_sub(1);
+
+    //     let column_id = self.selected.column_id;
+
+    //     if left_idx != column_id {
+    //         let left_of = board.columns_order.get(left_idx);
+
+    //         if let Some(left_of) = left_of {
+    //             board.columns.get_mut(left_of)
+    //         } else {
+    //             None
+    //         }
+    //     } else {
+    //         None
+    //     }
+    // }
+
+    // fn column_right_of_selected_column_mut(&mut self) -> Option<&mut Vec<Card>> {
+    //     let board = self.board.as_mut().unwrap();
+
+    //     let right_of = board.columns_order.get(self.selected.column_id + 1);
+
+    //     if let Some(right_of) = right_of {
+    //         board.columns.get_mut(right_of)
+    //     } else {
+    //         None
+    //     }
+    // }
+
+    // fn load_columns_and_cards_for_selected_board(&mut self) -> anyhow::Result<()> {
+    //     let board_id = self.boards[self.selected.board_index.unwrap()].id;
+
+    //     let cards_and_column_names = self.repo.get_cards_for_board(board_id)?;
+
+    //     for (name, cards) in cards_and_column_names {
+    //         self.columns.push(Column { name, cards })
+    //     }
+
+    //     Ok(())
+    // }
+
+    fn create_column(&mut self, column_name: &str) -> anyhow::Result<()> {
+        if let Some(board) = &mut self.board {
+            let column = self.repo.create_column_for_board(board.id, column_name)?;
+            if !board
+                .columns
+                .iter()
+                .any(|column| column.name == column_name)
+            {
+                board.columns.push(column)
+            }
+        } else {
+            return Err(anyhow!("No board selected"));
+        }
+
+        Ok(())
+    }
+
+    fn create_board(&mut self, name: &str, column_names: &[&str]) -> anyhow::Result<u64> {
+        self.repo.create_board(name, column_names)
+    }
+
+    // fn current_cards_mut(&mut self) -> &mut Vec<Card> {
+    //     &mut self.columns[self.selected.column_id].cards
+    // }
+}
 
 #[derive(Debug)]
 struct Repo {
@@ -67,11 +366,25 @@ impl Repo {
 
             create unique index if not exists boards_name on boards (name);
 
+            create table if not exists statuses (
+                id integer primary key,
+                name text not null,
+                column_order integer not null,
+                board_id integer not null,
+                inserted_at timestamp not null default current_timestamp,
+                updated_at timestamp not null default current_timestamp,
+
+                foreign key(board_id) references boards(id)
+            );
+
+            create unique index if not exists statuses_name_board_id on statuses (name, board_id);
+            create index if not exists statuses_board_id on statuses (board_id);
+
             create table if not exists cards (
                 id integer primary key,
                 board_id integer not null,
                 title text not null,
-                status text not null default 'Todo',
+                status_id integer not null,
                 body text not null,
                 doing_at timestamp,
                 done_at timestamp,
@@ -79,13 +392,155 @@ impl Repo {
                 updated_at timestamp not null default current_timestamp,
 
                 foreign key(board_id) references boards(id)
+                foreign key(status_id) references statuses(id)
             );
 
             create index if not exists cards_board_id on cards (board_id);
-            create index if not exists cards_status on cards (status);
+            create index if not exists cards_status_id on cards (status_id);
     ",
         )?;
         Ok(())
+    }
+
+    fn get_board_metas(&self) -> anyhow::Result<Vec<BoardMeta>> {
+        let mut s = self.conn.prepare(
+            "
+        select
+            id,
+            name
+        from boards
+        order by name asc
+        ",
+        )?;
+
+        let boards_iter = s.query_map([], |row| {
+            Ok(BoardMeta {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?;
+
+        let mut boards = vec![];
+
+        for board in boards_iter {
+            boards.push(board?);
+        }
+
+        Ok(boards)
+    }
+
+    fn load_board(&self, board_id: u64) -> anyhow::Result<Board> {
+        let mut board_s = self.conn.prepare(
+            "
+        select
+            name
+        from boards
+        where id = ?
+        ",
+        )?;
+
+        let board_name: String = board_s.query_one([board_id], |row| Ok(row.get(0)?))?;
+
+        // let statuses_ordered: Vec<String> = {
+        //     let mut statuses_s = self.conn.prepare(
+        //         "
+        //         select
+        //             name,
+        //             column_order
+        //         from statuses
+        //         where board_id = ?
+        //         order by column_order asc
+        //         ",
+        //     )?;
+
+        //     let statuses_iter = statuses_s.query_map([board_id], |row| row.get(0))?;
+
+        //     let mut statuses_ordered = vec![];
+
+        //     for status in statuses_iter {
+        //         statuses_ordered.push(status?)
+        //     }
+
+        //     statuses_ordered
+        // };
+
+        let columns = self.get_cards_for_board(board_id)?;
+
+        Ok(Board {
+            id: board_id,
+            name: board_name,
+            columns,
+        })
+    }
+
+    fn get_cards_for_board(&self, board_id: u64) -> anyhow::Result<Vec<Column>> {
+        // struct CardWithStatus {
+        //     id: u64,
+        //     title: String,
+        //     body: String,
+        //     status: String,
+        // }
+
+        let mut statuses_s = self.conn.prepare(
+            "
+            select
+                name
+            from statuses
+            where board_id = ?
+            order by column_order asc
+            ",
+        )?;
+
+        let statuses_iter = statuses_s.query_map([board_id], |row| Ok(row.get(0)?))?;
+
+        let mut columns = vec![];
+
+        for status in statuses_iter {
+            let status: String = status?;
+            let cards = self.cards_for_column(board_id, &status)?;
+            columns.push(Column {
+                name: status,
+                cards,
+            })
+        }
+
+        Ok(columns)
+
+        // let mut s = self.conn.prepare(
+        //     "
+        // select
+        //     id,
+        //     title,
+        //     body,
+        //     status
+        // from cards
+        // where board_id = ?
+        // order by status, id desc
+        // ",
+        // )?;
+
+        // let cards_iter = s.query_map([board_id], |row| {
+        //     Ok(CardWithStatus {
+        //         id: row.get(0)?,
+        //         title: row.get(1)?,
+        //         body: row.get(2)?,
+        //         status: row.get(3)?,
+        //     })
+        // })?;
+
+        // let mut columns = Vec::new();
+
+        // for card in cards_iter {
+        //     let card = card?;
+        //     let e = columns.entry(card.status).or_insert_with(Vec::new);
+        //     e.push(Card {
+        //         id: card.id,
+        //         title: card.title,
+        //         body: card.body,
+        //     });
+        // }
+
+        // Ok(columns)
     }
 
     fn insert_board(&mut self, name: &str) -> anyhow::Result<u64> {
@@ -118,12 +573,27 @@ impl Repo {
     }
 
     fn insert_card(&self, board_id: u64, title: &str, body: &str) -> anyhow::Result<Card> {
+        let status_id: Result<u64, rusqlite::Error> = self.conn.query_one(
+            "
+        select
+            id
+        from statuses
+        where board_id = ?
+        order by column_order asc
+        limit 1
+        ",
+            [board_id],
+            |row| row.get(0),
+        );
+
+        let status_id = status_id.unwrap();
+
         let card = self.conn.query_row(
             "
-        insert into cards (board_id, title, body) values (?, ?, ?)
+        insert into cards (board_id, status_id, title, body) values (?, ?, ?, ?)
         returning id
         ",
-            params![board_id, title, body],
+            params![board_id, status_id, title, body],
             |row| {
                 Ok(Card {
                     id: row.get(0)?,
@@ -140,13 +610,15 @@ impl Repo {
         let mut s = self.conn.prepare(
             "
             select
-                id,
-                title,
-                body
-            from cards where 1
-            and board_id = ?
-            and status = ?
-            order by id desc;
+                cards.id,
+                cards.title,
+                cards.body
+            from cards
+            inner join statuses
+                on statuses.id = cards.status_id
+                and statuses.board_id = ?1
+                and statuses.name = ?2
+            order by cards.id desc;
             ",
         )?;
 
@@ -182,31 +654,116 @@ impl Repo {
         Ok(())
     }
 
-    fn set_card_status(&self, card_id: u64, column_name: &str) -> anyhow::Result<()> {
+    fn set_card_status(
+        &self,
+        board_id: u64,
+        card_id: u64,
+        column_name: &str,
+    ) -> anyhow::Result<()> {
         self.conn.execute(
             "
         update cards
-        set status = ?2
-        where id = ?1
+        set status_id = (
+            select
+                id
+            from statuses
+            where board_id = ?1
+            and name = ?2
+        )
+        where id = ?3
         ",
-            params![card_id, column_name],
+            params![board_id, column_name, card_id],
         )?;
 
         Ok(())
     }
+
+    fn create_board(&mut self, name: &str, column_names: &[&str]) -> anyhow::Result<u64> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let board_id = {
+            let mut board_s = tx.prepare(
+                "
+                insert into boards (name) values (?)
+                returning id;
+                ",
+            )?;
+
+            let mut columns_s = tx.prepare(
+                "
+                insert into statuses (name, column_order, board_id)
+                values (?, ?, ?);
+                ",
+            )?;
+
+            let board_id: u64 = board_s.query_row([name], |row| Ok(row.get(0)?))?;
+
+            for (column_order, column_name) in column_names.iter().enumerate() {
+                columns_s.execute(params![column_name, column_order, board_id])?;
+            }
+
+            board_id
+        };
+
+        tx.commit()?;
+
+        Ok(board_id)
+    }
+
+    fn create_column_for_board(&self, board_id: u64, column_name: &str) -> anyhow::Result<Column> {
+        let mut latest_column_order_s = self.conn.prepare(
+            "
+        select
+            column_order
+        from statuses
+        where board_id = ?
+        order by column_order desc
+        limit 1
+        ",
+        )?;
+
+        let mut statuses_s = self.conn.prepare(
+            "
+        insert into statuses (name, column_order, board_id)
+        values (?, ?, ?)
+        on conflict do nothing;
+        ",
+        )?;
+
+        let column_order: Option<u64> = latest_column_order_s
+            .query_one([board_id], |row| row.get(0))
+            .optional()?;
+
+        let column_order = if let Some(column_order) = column_order {
+            column_order
+        } else {
+            0
+        };
+
+        statuses_s.execute(params![column_name, column_order, board_id])?;
+
+        Ok(Column {
+            name: column_name.to_string(),
+            cards: vec![],
+        })
+    }
 }
 
 #[derive(Debug)]
-struct Model {
-    current_board_id: u64,
+struct Board {
+    id: u64,
+    name: String,
     columns: Vec<Column>,
-    selected: SelectedState,
-    mode: Mode,
-    running_state: RunningState,
-    repo: Repo,
-    error: Option<String>,
-    internal_event_tx: std::sync::mpsc::Sender<Event>,
-    internal_event_rx: std::sync::mpsc::Receiver<Event>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct SelectedState {
+    board_id: u64,
+    board_index: Option<usize>,
+    column_index: usize,
+    card_index: Option<usize>,
 }
 
 enum Event {
@@ -228,65 +785,6 @@ impl Column {
     fn new(name: String, cards: Vec<Card>) -> Self {
         Column { name, cards }
     }
-}
-
-impl Model {
-    fn new(options: Options) -> anyhow::Result<Self> {
-        let repo = Repo::new(options.database_path)?;
-
-        // TODO actually load the most recently used board or default board or something
-        let current_board_id = 1;
-
-        // TODO load cards for the current board
-        let todo_cards = repo.cards_for_column(1, "Todo")?;
-        let doing_cards = repo.cards_for_column(1, "Doing")?;
-        let done_cards = repo.cards_for_column(1, "Done")?;
-        let archived_cards = repo.cards_for_column(1, "Archived")?;
-
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        Ok(Self {
-            current_board_id,
-            columns: vec![
-                Column::new("Todo".to_string(), todo_cards),
-                Column::new("Doing".to_string(), doing_cards),
-                Column::new("Done".to_string(), done_cards),
-                Column::new("Archived".to_string(), archived_cards),
-            ],
-            selected: SelectedState {
-                column_id: 0,
-                card_index: None,
-            },
-            mode: Mode::ViewingBoard,
-            running_state: RunningState::Running,
-            repo,
-            error: None,
-            internal_event_tx: tx,
-            internal_event_rx: rx,
-        })
-    }
-
-    fn selected_card(&self) -> Option<&Card> {
-        if let Some(card_index) = self.selected.card_index {
-            Some(&self.columns[self.selected.column_id].cards[card_index])
-        } else {
-            None
-        }
-    }
-
-    fn current_cards(&self) -> &[Card] {
-        &self.columns[self.selected.column_id].cards
-    }
-
-    // fn current_cards_mut(&mut self) -> &mut Vec<Card> {
-    //     &mut self.columns[self.selected.column_id].cards
-    // }
-}
-
-#[derive(Debug, Default, PartialEq)]
-struct SelectedState {
-    column_id: usize,
-    card_index: Option<usize>,
 }
 
 impl Display for Column {
@@ -315,6 +813,7 @@ enum Mode {
     ViewingBoard,
     ViewingCardDetail,
     MovingCard,
+    ViewingBoards,
 }
 
 #[derive(Debug, PartialEq)]
@@ -334,6 +833,9 @@ enum Message {
     ViewBoardMode,
     ViewCardDetailMode,
     SetError(Option<String>),
+    ViewBoardsMode,
+    EditBoard,
+    NewBoard,
 }
 
 fn run_editor<B>(terminal: &mut Terminal<B>, template_text: &str) -> anyhow::Result<String>
@@ -366,97 +868,138 @@ where
 }
 
 fn view(model: &mut Model, frame: &mut ratatui::Frame) {
+    match model.mode {
+        Mode::ViewingBoard | Mode::ViewingCardDetail | Mode::MovingCard => view_board(model, frame),
+        Mode::ViewingBoards => view_boards(model, frame),
+    }
+}
+
+fn view_boards(model: &mut Model, frame: &mut ratatui::Frame<'_>) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Max(3)])
+        .constraints([Constraint::Min(1), Constraint::Max(99)])
         .split(frame.area());
 
-    let columns_layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(std::iter::repeat_n(
-            Constraint::Ratio(1, model.columns.len().try_into().unwrap()),
-            model.columns.len(),
-        ))
-        .split(layout[0]);
+    let mut state = ListState::default().with_selected(model.selected.board_index);
 
-    for (column_id, column) in model.columns.iter().enumerate() {
-        let column_layout = Layout::default()
+    let list_items = model
+        .board_metas
+        .iter()
+        .map(|board| ListItem::new(&*board.name))
+        .collect::<Vec<_>>();
+
+    const PINK: Color = Color::Rgb(255, 150, 167);
+
+    let list = List::new(list_items)
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().fg(PINK))
+        .block(
+            Block::new()
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(Color::Black)),
+        );
+
+    frame.render_widget(Paragraph::new("Boards"), layout[0]);
+    frame.render_stateful_widget(list, layout[1], &mut state);
+}
+
+fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
+    if let Some(board) = &model.board {
+        let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Max(1), Constraint::Min(5)])
-            .split(columns_layout[column_id]);
+            .constraints([Constraint::Min(1), Constraint::Max(3)])
+            .split(frame.area());
 
-        frame.render_widget(Paragraph::new(&*column.name), column_layout[0]);
+        let columns_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(std::iter::repeat_n(
+                Constraint::Ratio(1, board.columns.len().try_into().unwrap()),
+                board.columns.len(),
+            ))
+            .split(layout[0]);
 
-        let mut state = if model.selected.column_id == column_id {
-            ListState::default().with_selected(model.selected.card_index)
-        } else {
-            ListState::default().with_selected(None)
-        };
+        // for (column_id, column) in model.columns.iter().enumerate() {
+        for (i, column) in board.columns.iter().enumerate() {
+            let column_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Max(1), Constraint::Min(5)])
+                .split(columns_layout[i]);
 
-        let list_items = column
-            .cards
-            .iter()
-            .map(|card| ListItem::new(format!("{} {}", card.id, card.title)))
-            .collect::<Vec<_>>();
+            frame.render_widget(Paragraph::new(&*column.name), column_layout[0]);
 
-        const PINK: Color = Color::Rgb(255, 150, 167);
+            let mut state = if model.selected.column_index == i {
+                ListState::default().with_selected(model.selected.card_index)
+            } else {
+                ListState::default().with_selected(None)
+            };
 
-        let list = List::new(list_items)
-            .highlight_symbol("> ")
-            .highlight_style(Style::default().fg(PINK))
-            .block(
-                Block::new()
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-                    .border_style(Style::default().fg(Color::Black)),
-            );
+            let list_items = column
+                .cards
+                .iter()
+                .map(|card| ListItem::new(format!("{} {}", card.id, card.title)))
+                .collect::<Vec<_>>();
 
-        frame.render_stateful_widget(list, column_layout[1], &mut state);
+            const PINK: Color = Color::Rgb(255, 150, 167);
 
-        if model.mode == Mode::ViewingCardDetail
-            && let Some(card) = model.selected_card()
-        {
-            let block = Block::bordered().title(format!("{} - {}", card.id, card.title));
-            let paragraph = Paragraph::new(&*card.body).block(block);
+            let list = List::new(list_items)
+                .highlight_symbol("> ")
+                .highlight_style(Style::default().fg(PINK))
+                .block(
+                    Block::new()
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                        .border_style(Style::default().fg(Color::Black)),
+                );
 
-            let area = popup_area(frame.area(), 60, 50);
+            frame.render_stateful_widget(list, column_layout[1], &mut state);
 
-            frame.render_widget(ratatui::widgets::Clear, area); //this clears out the background
-            frame.render_widget(paragraph, area);
+            if model.mode == Mode::ViewingCardDetail
+                && let Some(card) = model.selected_card()
+            {
+                let block = Block::bordered().title(format!("{} - {}", card.id, card.title));
+                let paragraph = Paragraph::new(&*card.body).block(block);
 
-            /// helper function to create a centered rect using up certain percentage of the available rect `r`
-            fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-                let vertical =
-                    Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
-                let horizontal =
-                    Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);
-                let [area] = vertical.areas(area);
-                let [area] = horizontal.areas(area);
-                area
+                let area = popup_area(frame.area(), 60, 50);
+
+                frame.render_widget(ratatui::widgets::Clear, area); //this clears out the background
+                frame.render_widget(paragraph, area);
+
+                /// helper function to create a centered rect using up certain percentage of the available rect `r`
+                fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+                    let vertical =
+                        Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
+                    let horizontal =
+                        Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);
+                    let [area] = vertical.areas(area);
+                    let [area] = horizontal.areas(area);
+                    area
+                }
             }
         }
+
+        let modeline = {
+            let modeline_block = Block::new()
+                .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT);
+
+            let mut modeline_text = (match model.mode {
+                Mode::ViewingBoard => "VIEWING BOARD",
+                Mode::ViewingCardDetail => "VIEWING CARD",
+                Mode::MovingCard => "MOVING CARD",
+                Mode::ViewingBoards => "VIEWING BOARDS",
+            })
+            .to_string();
+
+            if let Some(e) = &model.error {
+                modeline_text.push_str(" - Error: ");
+                modeline_text.push_str(&e.replace("\n", " "));
+            }
+
+            Paragraph::new(modeline_text).block(modeline_block)
+        };
+
+        frame.render_widget(modeline, layout[1]);
     }
-
-    let modeline = {
-        let modeline_block =
-            Block::new().borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT);
-
-        let mut modeline_text = (match model.mode {
-            Mode::ViewingBoard => "VIEWING BOARD",
-            Mode::ViewingCardDetail => "VIEWING CARD",
-            Mode::MovingCard => "MOVING CARD",
-        })
-        .to_string();
-
-        if let Some(e) = &model.error {
-            modeline_text.push_str(" - Error: ");
-            modeline_text.push_str(&e.replace("\n", " "));
-        }
-
-        Paragraph::new(modeline_text).block(modeline_block)
-    };
-
-    frame.render_widget(modeline, layout[1]);
 }
 
 /// Convert Event to Message
@@ -480,9 +1023,6 @@ fn receive_event(model: &Model) -> anyhow::Result<Option<Message>> {
 
 fn handle_event(event: Event, model: &Model) -> Option<Message> {
     match event {
-        Event::InternalEvent(e) => match e {
-            InternalEvent::ClearError => Some(Message::SetError(None)),
-        },
         Event::KeyEvent(key) => match model.mode {
             Mode::ViewingBoard => match key.code {
                 KeyCode::Char('h') | KeyCode::Left => Some(Message::NavigateLeft),
@@ -493,6 +1033,7 @@ fn handle_event(event: Event, model: &Model) -> Option<Message> {
                 KeyCode::Char('m') => Some(Message::MoveCardMode),
                 KeyCode::Char('n') => Some(Message::NewCard),
                 KeyCode::Char('e') => Some(Message::EditCard),
+                KeyCode::Char('b') => Some(Message::ViewBoardsMode),
                 KeyCode::Enter => Some(Message::ViewCardDetailMode),
                 _ => None,
             },
@@ -507,6 +1048,18 @@ fn handle_event(event: Event, model: &Model) -> Option<Message> {
                 KeyCode::Enter | KeyCode::Esc => Some(Message::ViewBoardMode),
                 _ => None,
             },
+            Mode::ViewingBoards => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(Message::NavigateDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Message::NavigateUp),
+                KeyCode::Char('n') => Some(Message::NewBoard),
+                KeyCode::Char('e') => Some(Message::EditBoard),
+                KeyCode::Char('q') => Some(Message::Quit),
+                KeyCode::Enter => Some(Message::ViewBoardMode),
+                _ => None,
+            },
+        },
+        Event::InternalEvent(e) => match e {
+            InternalEvent::ClearError => Some(Message::SetError(None)),
         },
     }
 }
@@ -537,141 +1090,200 @@ where
     F: Fn(&mut Terminal<B>, &str) -> anyhow::Result<String>,
     B: Backend,
 {
-    match msg {
-        Message::Quit => {
-            // You can handle cleanup and exit here
-            model.running_state = RunningState::Done;
+    match model.mode {
+        Mode::ViewingBoard => {
+            match msg {
+                Message::ViewBoardsMode => {
+                    model.mode = Mode::ViewingBoards;
+                    model.board_metas = model.repo.get_board_metas()?;
+                    model.board = None;
+                    if !model.board_metas.is_empty() {
+                        model.selected.board_index = Some(0);
+                    }
+                }
+                Message::MoveCardMode => model.mode = Mode::MovingCard,
+                Message::ViewCardDetailMode => model.mode = Mode::ViewingCardDetail,
+                Message::Quit => {
+                    // You can handle cleanup and exit here
+                    model.running_state = RunningState::Done;
+                }
+                Message::NavigateLeft => model.navigate_left(),
+                Message::NavigateDown => {
+                    model.selected.card_index = model.selected.card_index.map(|i| {
+                        min(
+                            i.saturating_add(1),
+                            model.selected_column().cards.len().saturating_sub(1),
+                        )
+                    })
+                }
+                Message::NavigateUp => {
+                    model.selected.card_index =
+                        model.selected.card_index.map(|i| i.saturating_sub(1))
+                }
+                Message::NavigateRight => model.navigate_right(),
+                Message::NewCard => {
+                    let raw_card_text =
+                        run_editor_fn(terminal, "Title\n==========\n\nContent goes here")?;
+                    let (title, body) = parse_raw_card_text(&raw_card_text)?;
+
+                    let card = model
+                        .repo
+                        .insert_card(model.selected.board_id, title, body)?;
+
+                    model.mode = Mode::ViewingBoard;
+                    model.selected.column_index = 0;
+                    model.selected.card_index = Some(0);
+
+                    model.add_card_to_selected_column(card);
+                }
+                Message::EditCard => {
+                    if let Some(card) = model.selected_card() {
+                        let card_for_editor =
+                            format!("{}\n==========\n\n{}", card.title, card.body);
+
+                        let raw_card_text = run_editor_fn(terminal, &card_for_editor)?;
+
+                        let (title, body) = parse_raw_card_text(&raw_card_text)?;
+
+                        model.repo.update_card(card.id, title, body)?;
+
+                        // dumb but necessary to reborrow because we previously borrow the model immutably
+                        if let Some(card) = model.selected_card_mut() {
+                            card.title = title.to_string();
+                            card.body = body.to_string();
+                        }
+                    }
+
+                    model.mode = Mode::ViewingBoard;
+                }
+                Message::SetError(e) => {
+                    model.error = e;
+                    let internal_event_tx = model.internal_event_tx.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(10));
+                        let _ =
+                            internal_event_tx.send(Event::InternalEvent(InternalEvent::ClearError));
+                    });
+                }
+                m => panic!("unhandled message: {:?}", m),
+            };
         }
-        Message::NavigateLeft => navigate_left(model),
-        Message::NavigateDown => {
-            model.selected.card_index = model.selected.card_index.map(|i| {
-                min(
-                    i.saturating_add(1),
-                    model.current_cards().len().saturating_sub(1),
-                )
-            })
-        }
-        Message::NavigateUp => {
-            model.selected.card_index = model.selected.card_index.map(|i| i.saturating_sub(1))
-        }
-        Message::NavigateRight => navigate_right(model),
-        Message::NewCard => {
-            let raw_card_text = run_editor_fn(terminal, "Title\n==========\n\nContent goes here")?;
-            let (title, body) = parse_raw_card_text(&raw_card_text)?;
-
-            let card = model
-                .repo
-                .insert_card(model.current_board_id, title, body)?;
-
-            model.mode = Mode::ViewingBoard;
-            model.selected.column_id = 0;
-            model.selected.card_index = Some(0);
-
-            model.columns[model.selected.column_id].cards.push(card);
-
-            model.columns[model.selected.column_id]
-                .cards
-                .sort_unstable_by(|a, b| b.id.cmp(&a.id));
-        }
-        Message::MoveCardMode => model.mode = Mode::MovingCard,
-        Message::MoveCardLeft => move_selected_card_left(model)?,
-        Message::MoveCardRight => move_selected_card_right(model)?,
-        Message::ViewCardDetailMode => model.mode = Mode::ViewingCardDetail,
-        Message::EditCard => {
-            if let Some(card_index) = model.selected.card_index {
-                let card = &mut model.columns[model.selected.column_id].cards[card_index];
-
-                let card_for_editor = format!("{}\n==========\n\n{}", card.title, card.body);
-
-                let raw_card_text = run_editor_fn(terminal, &card_for_editor)?;
-
-                let (title, body) = parse_raw_card_text(&raw_card_text)?;
-
-                model.repo.update_card(card.id, title, body)?;
-                card.title = title.to_string();
-                card.body = body.to_string();
+        Mode::ViewingCardDetail => match msg {
+            Message::ViewBoardMode => model.mode = Mode::ViewingBoard,
+            m => panic!("unhandled message: {:?}", m),
+        },
+        Mode::MovingCard => match msg {
+            Message::MoveCardLeft => move_selected_card_left(model)?,
+            Message::MoveCardRight => move_selected_card_right(model)?,
+            Message::ViewBoardMode => model.mode = Mode::ViewingBoard,
+            m => panic!("unhandled message: {:?}", m),
+        },
+        Mode::ViewingBoards => match msg {
+            Message::NavigateUp => {
+                model.selected.board_index = model.selected.board_index.map(|i| i.saturating_sub(1))
             }
+            Message::NavigateDown => {
+                model.selected.board_index = model
+                    .selected
+                    .board_index
+                    .map(|i| min(model.board_metas.len().saturating_sub(1), i + 1))
+            }
+            Message::NewBoard => {
+                let raw_board_text = run_editor_fn(
+                    terminal,
+                    "Board Name\n==========\n\n- Column #1\n- Column #2\n- Column #3",
+                )?;
+                let (name, column_names) = parse_raw_board_text(&raw_board_text)?;
 
-            model.mode = Mode::ViewingBoard;
-        }
-        Message::ViewBoardMode => model.mode = Mode::ViewingBoard,
-        Message::SetError(e) => {
-            model.error = e;
-            let internal_event_tx = model.internal_event_tx.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                let _ = internal_event_tx.send(Event::InternalEvent(InternalEvent::ClearError));
-            });
-        }
-    };
+                // TODO
+                // 1. create board, get board_id
+                model.create_board(name, &column_names)?;
+                // 2. insert columns, get columns ids
+            }
+            Message::EditBoard => todo!(),
+            Message::ViewBoardMode => {
+                model.mode = Mode::ViewingBoard;
+                model.load_selected_board()?;
+                model.board_metas = vec![];
+            }
+            Message::Quit => model.running_state = RunningState::Done,
+            m => panic!("unhandled message: {:?}", m),
+        },
+    }
 
     Ok(None)
 }
 
-fn navigate_left(model: &mut Model) {
-    let possible_left_column_id = model.selected.column_id.saturating_sub(1);
+// fn navigate_left(model: &mut Model) {
+//     let possible_left_column_id = model.selected.column_id.saturating_sub(1);
 
-    if let Some(left_column) = model.columns.get(possible_left_column_id)
-        && !left_column.cards.is_empty()
-        && possible_left_column_id != model.selected.column_id
-    {
-        model.selected.column_id = possible_left_column_id;
+//     if let Some(left_column) = model.column_left_of_selected_column_mut()
+//         && !left_column.is_empty()
+//     {
+//         model.selected.column_id = possible_left_column_id;
 
-        if left_column.cards.is_empty() {
-            model.selected.card_index = None
-        } else {
-            model.selected.card_index = Some(min(
-                left_column.cards.len().saturating_sub(1),
-                model
-                    .selected
-                    .card_index
-                    .unwrap_or(left_column.cards.len().saturating_sub(1)),
-            ))
-        }
-    }
-}
+//         model.selected.card_index = Some(min(
+//             left_column.len().saturating_sub(1),
+//             model
+//                 .selected
+//                 .card_index
+//                 .unwrap_or(left_column.len().saturating_sub(1)),
+//         ));
+//     }
+// }
 
-fn navigate_right(model: &mut Model) {
-    let possible_right_column_id = model.selected.column_id.saturating_add(1);
+// fn navigate_right(model: &mut Model) {
+//     let possible_right_column_id = model.selected.column_id.saturating_add(1);
 
-    if let Some(right_column) = &model.columns.get(possible_right_column_id)
-        && !right_column.cards.is_empty()
-    {
-        model.selected.column_id = possible_right_column_id;
+//     if let Some(right_column) = &model.columns.get(possible_right_column_id)
+//         && !right_column.cards.is_empty()
+//     {
+//         model.selected.column_id = possible_right_column_id;
 
-        if right_column.cards.is_empty() {
-            model.selected.card_index = None
-        } else {
-            model.selected.card_index = Some(min(
-                right_column.cards.len().saturating_sub(1),
-                model
-                    .selected
-                    .card_index
-                    .unwrap_or(right_column.cards.len().saturating_sub(1)),
-            ))
-        }
-    }
-}
+//         if right_column.cards.is_empty() {
+//             model.selected.card_index = None
+//         } else {
+//             model.selected.card_index = Some(min(
+//                 right_column.cards.len().saturating_sub(1),
+//                 model
+//                     .selected
+//                     .card_index
+//                     .unwrap_or(right_column.cards.len().saturating_sub(1)),
+//             ))
+//         }
+//     }
+// }
+
+// fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
+//     // if let Some(card) = model.selected_card() {
+//     // let selected_column =
+//     // }
+//     Ok(())
+// }
 
 fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
-    if let Some(selected_card_index) = model.selected.card_index {
-        let current_column_id = model.selected.column_id;
-        let left_column_id = model.selected.column_id.saturating_sub(1);
+    if let Some(board) = &mut model.board {
+        if let Some(selected_card_index) = model.selected.card_index {
+            let current_column_id = model.selected.column_index;
+            let left_column_id = model.selected.column_index.saturating_sub(1);
 
-        if left_column_id != current_column_id {
-            let card = model.columns[current_column_id]
-                .cards
-                .remove(selected_card_index);
+            if left_column_id != current_column_id {
+                let card = board.columns[current_column_id]
+                    .cards
+                    .remove(selected_card_index);
 
-            model
-                .repo
-                .set_card_status(card.id, &model.columns[left_column_id].name)?;
+                model.repo.set_card_status(
+                    board.id,
+                    card.id,
+                    &board.columns[left_column_id].name,
+                )?;
 
-            model.columns[left_column_id].cards.insert(0, card);
+                board.columns[left_column_id].cards.insert(0, card);
 
-            model.selected.card_index = Some(0);
+                model.selected.card_index = Some(0);
 
-            model.selected.column_id = left_column_id;
+                model.selected.column_index = left_column_id;
+            }
         }
     }
 
@@ -679,27 +1291,31 @@ fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
 }
 
 fn move_selected_card_right(model: &mut Model) -> anyhow::Result<()> {
-    if let Some(selected_card_index) = model.selected.card_index {
-        let current_column_id = model.selected.column_id;
-        let right_column_id = min(
-            model.selected.column_id + 1,
-            model.columns.len().saturating_sub(1),
-        );
+    if let Some(board) = &mut model.board {
+        if let Some(selected_card_index) = model.selected.card_index {
+            let current_column_id = model.selected.column_index;
+            let right_column_id = min(
+                model.selected.column_index + 1,
+                board.columns.len().saturating_sub(1),
+            );
 
-        if right_column_id != current_column_id {
-            let card = model.columns[current_column_id]
-                .cards
-                .remove(selected_card_index);
+            if right_column_id != current_column_id {
+                let card = board.columns[current_column_id]
+                    .cards
+                    .remove(selected_card_index);
 
-            model
-                .repo
-                .set_card_status(card.id, &model.columns[right_column_id].name)?;
+                model.repo.set_card_status(
+                    board.id,
+                    card.id,
+                    &board.columns[right_column_id].name,
+                )?;
 
-            model.columns[right_column_id].cards.insert(0, card);
+                board.columns[right_column_id].cards.insert(0, card);
 
-            model.selected.card_index = Some(0);
+                model.selected.card_index = Some(0);
 
-            model.selected.column_id = right_column_id;
+                model.selected.column_index = right_column_id;
+            }
         }
     }
 
@@ -721,6 +1337,35 @@ fn parse_raw_card_text(raw_card_text: &str) -> anyhow::Result<(&str, &str)> {
     }
 }
 
+fn parse_raw_board_text(raw_board_text: &str) -> anyhow::Result<(&str, Vec<&str>)> {
+    let board_regex = Regex::new(r#"(?<name>[^=\n]+)\n=+\n\n"#).unwrap();
+
+    let columns_regex = Regex::new(r#"- (?<column>[^\n]+)"#).unwrap();
+
+    let m_name = board_regex.captures(raw_board_text);
+    let m_columns = columns_regex.captures_iter(raw_board_text);
+
+    if let Some(captures_name) = m_name
+        && let Some(name) = captures_name.name("name")
+    {
+        let mut columns = vec![];
+
+        for cap in m_columns {
+            if let Some(column) = cap.name("column") {
+                columns.push(column.as_str())
+            }
+        }
+
+        if columns.is_empty() {
+            return Err(anyhow!("could not parse raw board text: bad columns"));
+        }
+
+        Ok((name.as_str(), columns))
+    } else {
+        Err(anyhow!("could not parse raw board text: bad board name"))
+    }
+}
+
 #[derive(Parser)]
 #[command(author, version, about, name = "kk")]
 struct Options {
@@ -735,9 +1380,18 @@ fn main() -> anyhow::Result<()> {
 
     let mut model = Model::new(options)?;
 
-    if !model.columns[0].cards.is_empty() {
-        model.selected.card_index = Some(0);
+    model.create_column("Todo")?;
+
+    if let Some(board) = &model.board {
+        if let Some(first_column) = board.columns.first() {
+            if !first_column.cards.is_empty() {
+                model.selected.card_index = Some(0);
+            }
+        }
     }
+    // if !model.columns[0].cards.is_empty() {
+    //     model.selected.card_index = Some(0);
+    // }
 
     while model.running_state != RunningState::Done {
         // Render the current view
@@ -775,10 +1429,12 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![Column {
-                name: "Todo".to_string(),
-                cards: vec![],
-            }];
+            model.create_column("Todo").unwrap();
+
+            // model.board.as_mut().unwrap().columns = vec![Column {
+            //     name: "Todo".to_string(),
+            //     cards: vec![],
+            // }];
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -805,12 +1461,18 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![Column {
-                name: "Todo".to_string(),
-                cards: vec![],
-            }];
+            model.create_column("Todo").unwrap();
 
-            assert_eq!(model.selected.column_id, 0);
+            // model.columns = vec![Column {
+            //     name: "Todo".to_string(),
+            //     cards: vec![],
+            // }];
+            // model.board.as_mut().unwrap().columns = vec![Column {
+            //     name: "Todo".to_string(),
+            //     cards: vec![],
+            // }];
+
+            assert_eq!(model.selected.column_index, 0);
             assert_eq!(model.selected.card_index, None);
 
             let mut terminal =
@@ -829,7 +1491,8 @@ mod tests {
             assert!(update_result.is_ok());
 
             assert_eq!(
-                model.columns[0].cards,
+                model.board.unwrap().columns[0].cards,
+                // model.board.unwrap().columns["Todo"],
                 vec![Card {
                     id: 1,
                     title: "Valid Title".to_string(),
@@ -837,7 +1500,7 @@ mod tests {
                 }]
             );
 
-            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.column_index, 0);
             assert_eq!(model.selected.card_index, Some(0));
 
             assert_eq!(
@@ -864,6 +1527,8 @@ mod tests {
             })
             .unwrap();
 
+            model.create_column("Todo").unwrap();
+
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
@@ -879,10 +1544,10 @@ mod tests {
 
             assert!(update_result.is_ok());
 
-            model.selected.column_id = 0;
+            model.selected.column_index = 0;
             model.selected.card_index = Some(0);
 
-            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.column_index, 0);
             assert_eq!(model.selected.card_index, Some(0));
 
             let update_result = update_with_run_editor_fn(
@@ -898,7 +1563,7 @@ mod tests {
             assert!(update_result.is_err());
 
             assert_eq!(
-                model.columns[0].cards,
+                model.board.unwrap().columns[0].cards,
                 vec![Card {
                     id: 1,
                     title: "Valid Title".to_string(),
@@ -906,7 +1571,7 @@ mod tests {
                 }]
             );
 
-            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.column_index, 0);
             assert_eq!(model.selected.card_index, Some(0));
 
             assert_eq!(
@@ -928,6 +1593,8 @@ mod tests {
             })
             .unwrap();
 
+            model.create_column("Todo").unwrap();
+
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
@@ -943,10 +1610,10 @@ mod tests {
 
             assert!(update_result.is_ok());
 
-            model.selected.column_id = 0;
+            model.selected.column_index = 0;
             model.selected.card_index = Some(0);
 
-            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.column_index, 0);
             assert_eq!(model.selected.card_index, Some(0));
 
             let update_result = update_with_run_editor_fn(
@@ -962,7 +1629,8 @@ mod tests {
             assert!(update_result.is_ok());
 
             assert_eq!(
-                model.columns[0].cards,
+                model.board.unwrap().columns[0].cards,
+                // model.board.unwrap().columns["Todo"],
                 vec![Card {
                     id: 1,
                     title: "Valid Title".to_string(),
@@ -970,7 +1638,7 @@ mod tests {
                 }]
             );
 
-            assert_eq!(model.selected.column_id, 0);
+            assert_eq!(model.selected.column_index, 0);
             assert_eq!(model.selected.card_index, Some(0));
 
             assert_eq!(
@@ -1002,7 +1670,7 @@ mod tests {
     }
 
     mod navigate_left {
-        use crate::{Card, Column, Model, Options, RunningState, SelectedState, update};
+        use crate::{Board, Card, Column, Model, Options, RunningState, SelectedState, update};
 
         #[test]
         fn when_left() {
@@ -1020,7 +1688,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 0,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 0,
                     card_index: None
                 }
             );
@@ -1033,25 +1703,48 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![
-                Column {
-                    name: "Todo".to_string(),
-                    cards: vec![Card {
-                        id: 1,
-                        title: "great card".to_string(),
-                        body: "great body".to_string(),
-                    }],
-                },
-                Column {
-                    name: "Doing".to_string(),
-                    cards: vec![Card {
-                        id: 2,
-                        title: "title 2".to_string(),
-                        body: "body 2".to_string(),
-                    }],
-                },
-            ];
-            model.selected.column_id = 1;
+            model.board = Some(Board {
+                id: 1,
+                name: "Board".to_string(),
+                columns: vec![
+                    Column {
+                        name: "Todo".to_string(),
+                        cards: vec![Card {
+                            id: 1,
+                            title: "great card".to_string(),
+                            body: "great body".to_string(),
+                        }],
+                    },
+                    Column {
+                        name: "Doing".to_string(),
+                        cards: vec![Card {
+                            id: 2,
+                            title: "title 2".to_string(),
+                            body: "body 2".to_string(),
+                        }],
+                    },
+                ],
+            });
+
+            // model.columns = vec![
+            //     Column {
+            //         name: "Todo".to_string(),
+            //         cards: vec![Card {
+            //             id: 1,
+            //             title: "great card".to_string(),
+            //             body: "great body".to_string(),
+            //         }],
+            //     },
+            //     Column {
+            //         name: "Doing".to_string(),
+            //         cards: vec![Card {
+            //             id: 2,
+            //             title: "title 2".to_string(),
+            //             body: "body 2".to_string(),
+            //         }],
+            //     },
+            // ];
+            model.selected.column_index = 1;
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -1063,7 +1756,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 0,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 0,
                     card_index: Some(0)
                 }
             );
@@ -1076,21 +1771,40 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![
-                Column {
-                    name: "Todo".to_string(),
-                    cards: vec![],
-                },
-                Column {
-                    name: "Doing".to_string(),
-                    cards: vec![Card {
-                        id: 2,
-                        title: "title 2".to_string(),
-                        body: "body 2".to_string(),
-                    }],
-                },
-            ];
-            model.selected.column_id = 1;
+            model.board = Some(Board {
+                id: 1,
+                name: "Board".to_string(),
+                columns: vec![
+                    Column {
+                        name: "Todo".to_string(),
+                        cards: vec![],
+                    },
+                    Column {
+                        name: "Doing".to_string(),
+                        cards: vec![Card {
+                            id: 2,
+                            title: "title 2".to_string(),
+                            body: "body 2".to_string(),
+                        }],
+                    },
+                ],
+            });
+
+            // model.columns = vec![
+            //     Column {
+            //         name: "Todo".to_string(),
+            //         cards: vec![],
+            //     },
+            //     Column {
+            //         name: "Doing".to_string(),
+            //         cards: vec![Card {
+            //             id: 2,
+            //             title: "title 2".to_string(),
+            //             body: "body 2".to_string(),
+            //         }],
+            //     },
+            // ];
+            model.selected.column_index = 1;
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -1102,7 +1816,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 1,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 1,
                     card_index: Some(0)
                 }
             );
@@ -1110,7 +1826,7 @@ mod tests {
     }
 
     mod navigate_right {
-        use crate::{Card, Column, Model, Options, RunningState, SelectedState, update};
+        use crate::{Board, Card, Column, Model, Options, RunningState, SelectedState, update};
 
         #[test]
         fn when_right() {
@@ -1128,7 +1844,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 0,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 0,
                     card_index: None
                 }
             );
@@ -1141,25 +1859,30 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![
-                Column {
-                    name: "Todo".to_string(),
-                    cards: vec![Card {
-                        id: 1,
-                        title: "great card".to_string(),
-                        body: "great body".to_string(),
-                    }],
-                },
-                Column {
-                    name: "Doing".to_string(),
-                    cards: vec![Card {
-                        id: 2,
-                        title: "title 2".to_string(),
-                        body: "body 2".to_string(),
-                    }],
-                },
-            ];
-            model.selected.column_id = 0;
+            model.board = Some(Board {
+                id: 1,
+                name: "Board".to_string(),
+                columns: vec![
+                    Column {
+                        name: "Todo".to_string(),
+                        cards: vec![Card {
+                            id: 1,
+                            title: "great card".to_string(),
+                            body: "great body".to_string(),
+                        }],
+                    },
+                    Column {
+                        name: "Doing".to_string(),
+                        cards: vec![Card {
+                            id: 2,
+                            title: "title 2".to_string(),
+                            body: "body 2".to_string(),
+                        }],
+                    },
+                ],
+            });
+
+            model.selected.column_index = 0;
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -1171,7 +1894,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 1,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 1,
                     card_index: Some(0)
                 }
             );
@@ -1184,21 +1909,40 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![
-                Column {
-                    name: "Todo".to_string(),
-                    cards: vec![Card {
-                        id: 2,
-                        title: "title 2".to_string(),
-                        body: "body 2".to_string(),
-                    }],
-                },
-                Column {
-                    name: "Doing".to_string(),
-                    cards: vec![],
-                },
-            ];
-            model.selected.column_id = 1;
+            model.board = Some(Board {
+                id: 1,
+                name: "Board".to_string(),
+                columns: vec![
+                    Column {
+                        name: "Todo".to_string(),
+                        cards: vec![Card {
+                            id: 2,
+                            title: "title 2".to_string(),
+                            body: "body 2".to_string(),
+                        }],
+                    },
+                    Column {
+                        name: "Doing".to_string(),
+                        cards: vec![],
+                    },
+                ],
+            });
+
+            // model.columns = vec![
+            //     Column {
+            //         name: "Todo".to_string(),
+            //         cards: vec![Card {
+            //             id: 2,
+            //             title: "title 2".to_string(),
+            //             body: "body 2".to_string(),
+            //         }],
+            //     },
+            //     Column {
+            //         name: "Doing".to_string(),
+            //         cards: vec![],
+            //     },
+            // ];
+            model.selected.column_index = 1;
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -1210,7 +1954,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 1,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 1,
                     card_index: Some(0)
                 }
             );
@@ -1218,7 +1964,7 @@ mod tests {
     }
 
     mod navigate_down {
-        use crate::{Card, Column, Model, Options, RunningState, SelectedState, update};
+        use crate::{Board, Card, Column, Model, Options, RunningState, SelectedState, update};
 
         #[test]
         fn when_length_is_one() {
@@ -1227,15 +1973,28 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![Column {
-                name: "Todo".to_string(),
-                cards: vec![Card {
-                    id: 2,
-                    title: "title 2".to_string(),
-                    body: "body 2".to_string(),
+            model.board = Some(Board {
+                id: 1,
+                name: "Board".to_string(),
+                columns: vec![Column {
+                    name: "Todo".to_string(),
+                    cards: vec![Card {
+                        id: 2,
+                        title: "title 2".to_string(),
+                        body: "body 2".to_string(),
+                    }],
                 }],
-            }];
-            model.selected.column_id = 0;
+            });
+
+            // model.columns = vec![Column {
+            //     name: "Todo".to_string(),
+            //     cards: vec![Card {
+            //         id: 2,
+            //         title: "title 2".to_string(),
+            //         body: "body 2".to_string(),
+            //     }],
+            // }];
+            model.selected.column_index = 0;
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -1247,7 +2006,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 0,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 0,
                     card_index: Some(0)
                 }
             );
@@ -1260,22 +2021,27 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![Column {
-                name: "Todo".to_string(),
-                cards: vec![
-                    Card {
-                        id: 1,
-                        title: "title 1".to_string(),
-                        body: "body 1".to_string(),
-                    },
-                    Card {
-                        id: 2,
-                        title: "title 2".to_string(),
-                        body: "body 2".to_string(),
-                    },
-                ],
-            }];
-            model.selected.column_id = 0;
+            model.board = Some(Board {
+                id: 1,
+                name: "Board".to_string(),
+                columns: vec![Column {
+                    name: "Todo".to_string(),
+                    cards: vec![
+                        Card {
+                            id: 1,
+                            title: "title 1".to_string(),
+                            body: "body 1".to_string(),
+                        },
+                        Card {
+                            id: 2,
+                            title: "title 2".to_string(),
+                            body: "body 2".to_string(),
+                        },
+                    ],
+                }],
+            });
+
+            model.selected.column_index = 0;
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -1287,7 +2053,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 0,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 0,
                     card_index: Some(1)
                 }
             );
@@ -1295,7 +2063,7 @@ mod tests {
     }
 
     mod navigate_up {
-        use crate::{Card, Column, Model, Options, RunningState, SelectedState, update};
+        use crate::{Board, Card, Column, Model, Options, RunningState, SelectedState, update};
 
         #[test]
         fn when_length_is_one() {
@@ -1304,15 +2072,20 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![Column {
-                name: "Todo".to_string(),
-                cards: vec![Card {
-                    id: 2,
-                    title: "title 2".to_string(),
-                    body: "body 2".to_string(),
+            model.board = Some(Board {
+                id: 1,
+                name: "Board".to_string(),
+                columns: vec![Column {
+                    name: "Todo".to_string(),
+                    cards: vec![Card {
+                        id: 2,
+                        title: "title 2".to_string(),
+                        body: "body 2".to_string(),
+                    }],
                 }],
-            }];
-            model.selected.column_id = 0;
+            });
+
+            model.selected.column_index = 0;
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -1324,7 +2097,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 0,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 0,
                     card_index: Some(0)
                 }
             );
@@ -1337,22 +2112,27 @@ mod tests {
             })
             .unwrap();
 
-            model.columns = vec![Column {
-                name: "Todo".to_string(),
-                cards: vec![
-                    Card {
-                        id: 1,
-                        title: "title 1".to_string(),
-                        body: "body 1".to_string(),
-                    },
-                    Card {
-                        id: 2,
-                        title: "title 2".to_string(),
-                        body: "body 2".to_string(),
-                    },
-                ],
-            }];
-            model.selected.column_id = 0;
+            model.board = Some(Board {
+                id: 1,
+                name: "Board".to_string(),
+                columns: vec![Column {
+                    name: "Todo".to_string(),
+                    cards: vec![
+                        Card {
+                            id: 1,
+                            title: "title 1".to_string(),
+                            body: "body 1".to_string(),
+                        },
+                        Card {
+                            id: 2,
+                            title: "title 2".to_string(),
+                            body: "body 2".to_string(),
+                        },
+                    ],
+                }],
+            });
+
+            model.selected.column_index = 0;
             model.selected.card_index = Some(1);
 
             let mut terminal =
@@ -1364,7 +2144,9 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    column_id: 0,
+                    board_id: 1,
+                    board_index: None,
+                    column_index: 0,
                     card_index: Some(0)
                 }
             );
