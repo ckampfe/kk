@@ -918,8 +918,8 @@ fn handle_event(event: Event, model: &Model) -> Option<Message> {
                 _ => None,
             },
             Mode::MovingCard => match key.code {
-                KeyCode::Char('h') => Some(Message::MoveCardLeft),
-                KeyCode::Char('l') => Some(Message::MoveCardRight),
+                KeyCode::Char('h') | KeyCode::Left => Some(Message::MoveCardLeft),
+                KeyCode::Char('l') | KeyCode::Right => Some(Message::MoveCardRight),
                 KeyCode::Char('q') => Some(Message::Quit),
                 KeyCode::Char('m') | KeyCode::Enter | KeyCode::Esc => Some(Message::ViewBoardMode),
                 _ => None,
