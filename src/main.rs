@@ -1270,7 +1270,7 @@ mod tests {
     use crate::{Model, Options, RunningState, update};
 
     mod new_card {
-        use crate::{Card, Column, Model, Options, RunningState, update_with_run_editor_fn};
+        use crate::{Card, Model, Options, RunningState, update_with_run_editor_fn};
         use ratatui::Terminal;
 
         #[test]
