@@ -1,13 +1,6 @@
-// TODO typestate pattern, like:
-// Model<Mode> where Mode == ViewingBoard, MovingCard, ViewingBoards, etc.
-// or have different Model structs entirely, where we transition
-// from ViewingBoardModel to ViewingBoardsModel, etc.
-// and only allow orderly state transitions
-
-// - you're just not going to have more than a few columns
-// - those columns may have many cards
-// - Vec<Column>?
-// - Column { name: String, Vec<Card> }
+// TODO
+// - allow deleting of cards with popup confirmation
+// - load the most recently used board on startup
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -17,10 +10,12 @@ use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::prelude::Backend;
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::cmp::min;
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::io::Write;
 use std::path::PathBuf;
@@ -31,6 +26,7 @@ use std::time::Duration;
 struct BoardMeta {
     id: u64,
     name: String,
+    columns: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -89,7 +85,7 @@ impl Model {
 
     fn selected_card(&self) -> Option<&Card> {
         if let Some(card_index) = self.selected.card_index {
-            Some(&self.selected_column().cards[card_index])
+            self.selected_column().cards.get(card_index)
         } else {
             None
         }
@@ -113,18 +109,21 @@ impl Model {
             let left_column_id = self.selected.column_index.saturating_sub(1);
             if left_column_id != self.selected.column_index
                 && let Some(left_column) = board.columns.get(left_column_id)
-                && !left_column.cards.is_empty()
             {
                 let left_column_len = left_column.cards.len();
 
                 self.selected.column_index = left_column_id;
 
-                self.selected.card_index = Some(min(
-                    left_column_len.saturating_sub(1),
-                    self.selected
-                        .card_index
-                        .unwrap_or(left_column_len.saturating_sub(1)),
-                ));
+                self.selected.card_index = if left_column.cards.is_empty() {
+                    None
+                } else {
+                    Some(min(
+                        left_column_len.saturating_sub(1),
+                        self.selected
+                            .card_index
+                            .unwrap_or(left_column_len.saturating_sub(1)),
+                    ))
+                }
             }
         }
     }
@@ -139,12 +138,16 @@ impl Model {
 
                 self.selected.column_index = right_column_id;
 
-                self.selected.card_index = Some(min(
-                    right_column_len.saturating_sub(1),
-                    self.selected
-                        .card_index
-                        .unwrap_or(right_column_len.saturating_sub(1)),
-                ));
+                self.selected.card_index = if right_column.cards.is_empty() {
+                    None
+                } else {
+                    Some(min(
+                        right_column_len.saturating_sub(1),
+                        self.selected
+                            .card_index
+                            .unwrap_or(right_column_len.saturating_sub(1)),
+                    ))
+                }
             }
         }
     }
@@ -171,8 +174,37 @@ impl Model {
         Ok(())
     }
 
-    fn create_board(&mut self, name: &str, column_names: &[&str]) -> anyhow::Result<u64> {
-        self.repo.create_board(name, column_names)
+    fn create_board(&mut self, name: &str, column_names: &[&str]) -> anyhow::Result<()> {
+        self.repo.create_board(name, column_names)?;
+        self.board_metas = self.repo.get_board_metas()?;
+        Ok(())
+    }
+
+    fn update_selected_board(
+        &mut self,
+        new_board_name: &str,
+        new_column_names: Vec<&str>,
+    ) -> anyhow::Result<()> {
+        let selected_board = &self.board_metas[self.selected.board_index.unwrap()];
+
+        let current_names_set: HashSet<_> = selected_board.columns.iter().cloned().collect();
+
+        let new_names_set: HashSet<_> = new_column_names.iter().map(|s| s.to_string()).collect();
+
+        // TODO figure out adding/removing/etc
+        if new_names_set.is_superset(&current_names_set) {
+            let _new_board = self.repo.update_board_columns_order(
+                selected_board.id,
+                new_board_name,
+                new_column_names,
+            )?;
+
+            self.board_metas = self.repo.get_board_metas()?;
+        } else {
+            return Err(anyhow!("Could not update board: columns do not match"));
+        }
+
+        Ok(())
     }
 }
 
@@ -239,6 +271,9 @@ impl Repo {
             );
 
             create unique index if not exists statuses_name_board_id on statuses (name, board_id);
+            -- not possible to do this while updating orders that could be the same
+            -- during a transaction
+            -- create unique index if not exists statuses_column_order_board_id on statuses (column_order, board_id);
             create index if not exists statuses_board_id on statuses (board_id);
 
             create table if not exists cards (
@@ -267,17 +302,25 @@ impl Repo {
         let mut s = self.conn.prepare(
             "
         select
-            id,
-            name
+            boards.id,
+            boards.name,
+            group_concat(statuses.name, '|' order by statuses.column_order)
         from boards
-        order by name asc
+        inner join statuses
+            on statuses.board_id = boards.id
+        group by boards.id, boards.name
+        order by boards.name asc
         ",
         )?;
 
         let boards_iter = s.query_map([], |row| {
+            let column_names: String = row.get(2)?;
+            let columns_names = column_names.split('|').map(|s| s.to_string()).collect();
+
             Ok(BoardMeta {
                 id: row.get(0)?,
                 name: row.get(1)?,
+                columns: columns_names,
             })
         })?;
 
@@ -540,6 +583,45 @@ impl Repo {
             cards: vec![],
         })
     }
+
+    fn update_board_columns_order(
+        &mut self,
+        board_id: u64,
+        board_name: &str,
+        column_names: Vec<&str>,
+    ) -> anyhow::Result<Board> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        {
+            let mut change_column_order_s = tx.prepare(
+                "
+                insert into statuses (name, column_order, board_id)
+                values (?, ?, ?)
+                on conflict(name, board_id) do update set column_order = excluded.column_order;
+                ",
+            )?;
+
+            let mut change_board_name_s = tx.prepare(
+                "
+            update boards
+            set name = ?
+            where id = ?
+            ",
+            )?;
+
+            for (i, column_name) in column_names.iter().enumerate() {
+                change_column_order_s.execute(params![column_name, i, board_id])?;
+            }
+
+            change_board_name_s.execute(params![board_name, board_id])?;
+        }
+
+        tx.commit()?;
+
+        self.load_board(board_id)
+    }
 }
 
 #[derive(Debug)]
@@ -691,10 +773,10 @@ fn view_boards(model: &mut Model, frame: &mut ratatui::Frame<'_>) {
 
 fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
     if let Some(board) = &model.board {
-        let layout = Layout::default()
+        let [columns_layout, modeline_layout] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Max(3)])
-            .split(frame.area());
+            .areas(frame.area());
 
         let columns_layout = Layout::default()
             .direction(Direction::Horizontal)
@@ -702,7 +784,7 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                 Constraint::Ratio(1, board.columns.len().try_into().unwrap()),
                 board.columns.len(),
             ))
-            .split(layout[0]);
+            .split(columns_layout);
 
         for (i, column) in board.columns.iter().enumerate() {
             let column_layout = Layout::default()
@@ -721,7 +803,13 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
             let list_items = column
                 .cards
                 .iter()
-                .map(|card| ListItem::new(format!("{} {}", card.id, card.title)))
+                .map(|card| {
+                    let s = format!("{} {}", card.id, card.title);
+                    ListItem::new(Text::from(textwrap::fill(
+                        &s,
+                        column_layout[1].width as usize,
+                    )))
+                })
                 .collect::<Vec<_>>();
 
             const PINK: Color = Color::Rgb(255, 150, 167);
@@ -741,7 +829,9 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
             if model.mode == Mode::ViewingCardDetail
                 && let Some(card) = model.selected_card()
             {
-                let block = Block::bordered().title(format!("{} - {}", card.id, card.title));
+                let block = Block::bordered()
+                    .title(format!("{} - {}", card.id, card.title))
+                    .padding(Padding::uniform(1));
                 let paragraph = Paragraph::new(&*card.body).block(block);
 
                 let area = popup_area(frame.area(), 60, 50);
@@ -762,27 +852,33 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
             }
         }
 
-        let modeline = {
-            let modeline_block = Block::new()
-                .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT);
+        let modeline_block = Block::new()
+            .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+            .title(
+                Line::from(match model.mode {
+                    Mode::ViewingBoard => "VIEWING BOARD",
+                    Mode::ViewingCardDetail => "VIEWING CARD",
+                    Mode::MovingCard => "MOVING CARD",
+                    Mode::ViewingBoards => "VIEWING BOARDS",
+                })
+                .left_aligned(),
+            )
+            .title(Line::from(&*board.name).right_aligned());
 
-            let mut modeline_text = (match model.mode {
-                Mode::ViewingBoard => "VIEWING BOARD",
-                Mode::ViewingCardDetail => "VIEWING CARD",
-                Mode::MovingCard => "MOVING CARD",
-                Mode::ViewingBoards => "VIEWING BOARDS",
-            })
-            .to_string();
+        let modeline_text = {
+            let mut modeline_text = String::new();
 
             if let Some(e) = &model.error {
                 modeline_text.push_str(" - Error: ");
                 modeline_text.push_str(&e.replace("\n", " "));
             }
 
-            Paragraph::new(modeline_text).block(modeline_block)
+            modeline_text
         };
 
-        frame.render_widget(modeline, layout[1]);
+        let modeline = Paragraph::new(modeline_text).block(modeline_block);
+
+        frame.render_widget(modeline, modeline_layout);
     }
 }
 
@@ -883,6 +979,9 @@ where
                     model.board = None;
                     if !model.board_metas.is_empty() {
                         model.selected.board_index = Some(0);
+                        if let Some(board_index) = model.selected.board_index {
+                            model.selected.board_id = model.board_metas[board_index].id
+                        }
                     }
                 }
                 Message::MoveCardMode => model.mode = Mode::MovingCard,
@@ -964,13 +1063,22 @@ where
         },
         Mode::ViewingBoards => match msg {
             Message::NavigateUp => {
-                model.selected.board_index = model.selected.board_index.map(|i| i.saturating_sub(1))
+                model.selected.board_index =
+                    model.selected.board_index.map(|i| i.saturating_sub(1));
+
+                if let Some(board_index) = model.selected.board_index {
+                    model.selected.board_id = model.board_metas[board_index].id;
+                }
             }
             Message::NavigateDown => {
                 model.selected.board_index = model
                     .selected
                     .board_index
-                    .map(|i| min(model.board_metas.len().saturating_sub(1), i + 1))
+                    .map(|i| min(model.board_metas.len().saturating_sub(1), i + 1));
+
+                if let Some(board_index) = model.selected.board_index {
+                    model.selected.board_id = model.board_metas[board_index].id;
+                }
             }
             Message::NewBoard => {
                 let raw_board_text = run_editor_fn(
@@ -984,7 +1092,21 @@ where
                 model.create_board(name, &column_names)?;
                 // 2. insert columns, get columns ids
             }
-            Message::EditBoard => todo!(),
+            Message::EditBoard => {
+                let selected_board = &model.board_metas[model.selected.board_index.unwrap()];
+                let mut board_for_editor = format!("{}\n==========\n\n", selected_board.name);
+
+                for column_name in &selected_board.columns {
+                    board_for_editor.push_str("- ");
+                    board_for_editor.push_str(column_name);
+                    board_for_editor.push('\n');
+                }
+
+                let raw_board_text = run_editor_fn(terminal, &board_for_editor)?;
+                let (name, column_names) = parse_raw_board_text(&raw_board_text)?;
+
+                model.update_selected_board(name, column_names)?;
+            }
             Message::ViewBoardMode => {
                 model.mode = Mode::ViewingBoard;
                 model.load_selected_board()?;
@@ -1500,8 +1622,8 @@ mod tests {
                 SelectedState {
                     board_id: 1,
                     board_index: None,
-                    column_index: 1,
-                    card_index: Some(0)
+                    column_index: 0,
+                    card_index: None
                 }
             );
         }
