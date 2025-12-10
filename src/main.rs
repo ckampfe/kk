@@ -1353,9 +1353,9 @@ struct Options {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut terminal = ratatui::init();
-
     let options = Options::parse();
+
+    let mut terminal = ratatui::init();
 
     let mut model = Model::new(options)?;
 
