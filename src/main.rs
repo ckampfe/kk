@@ -31,6 +31,22 @@ struct BoardMeta {
     viewed_at: String,
 }
 
+#[derive(Debug, PartialEq)]
+enum ConfirmationState {
+    Yes,
+    No,
+}
+
+impl ConfirmationState {
+    fn toggle(&self) -> ConfirmationState {
+        if *self == ConfirmationState::Yes {
+            ConfirmationState::No
+        } else {
+            ConfirmationState::Yes
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Model {
     board_metas: Vec<BoardMeta>,
@@ -38,6 +54,7 @@ struct Model {
     selected: SelectedState,
     mode: Mode,
     running_state: RunningState,
+    confirmation_state: ConfirmationState,
     repo: Repo,
     error: Option<String>,
     internal_event_tx: std::sync::mpsc::Sender<Event>,
@@ -55,6 +72,7 @@ impl Model {
         Ok(Self {
             board_metas: vec![],
             board: Some(board),
+            confirmation_state: ConfirmationState::No,
             selected: SelectedState {
                 // TODO actually load the most recently used board or default board or something
                 board_id: 1,
@@ -105,6 +123,21 @@ impl Model {
         } else {
             None
         }
+    }
+
+    fn selected_card_id(&self) -> Option<u64> {
+        if let Some(card_index) = self.selected.card_index {
+            self.selected_column()
+                .cards
+                .get(card_index)
+                .map(|card| card.id)
+        } else {
+            None
+        }
+    }
+
+    fn toggle_confirmation_state(&mut self) {
+        self.confirmation_state = self.confirmation_state.toggle();
     }
 
     fn selected_card_mut(&mut self) -> Option<&mut Card> {
@@ -222,6 +255,27 @@ impl Model {
             self.board_metas = self.repo.get_board_metas()?;
         } else {
             return Err(anyhow!("Could not update board: columns do not match"));
+        }
+
+        Ok(())
+    }
+
+    fn confirm_card_delete(&mut self) -> anyhow::Result<()> {
+        self.mode = Mode::ConfirmCardDeletion;
+        Ok(())
+    }
+
+    fn delete_selected_card(&mut self) -> anyhow::Result<()> {
+        if let Some(card_id) = self.selected_card_id()
+            && let Some(board) = &mut self.board
+            && let Some(column) = board.columns.get_mut(self.selected.column_index)
+            && let Some(card_index) = self.selected.card_index.as_mut()
+        {
+            self.repo.delete_card(card_id)?;
+            column.cards.remove(*card_index);
+            if column.cards.len().saturating_sub(1) < *card_index {
+                *card_index = column.cards.len().saturating_sub(1);
+            }
         }
 
         Ok(())
@@ -721,6 +775,18 @@ impl Repo {
             columns,
         })
     }
+
+    fn delete_card(&self, card_id: u64) -> anyhow::Result<()> {
+        let mut s = self.conn.prepare(
+            "
+        delete from cards
+        where id = ?",
+        )?;
+
+        s.execute([card_id])?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -782,6 +848,7 @@ enum Mode {
     ViewingCardDetail,
     MovingCard,
     ViewingBoards,
+    ConfirmCardDeletion,
 }
 
 #[derive(Debug, PartialEq)]
@@ -804,6 +871,8 @@ enum Message {
     ViewBoardsMode,
     EditBoard,
     NewBoard,
+    DeleteCard,
+    ConfirmChoice,
 }
 
 fn run_editor<B>(terminal: &mut Terminal<B>, template_text: &str) -> anyhow::Result<String>
@@ -837,7 +906,10 @@ where
 
 fn view(model: &mut Model, frame: &mut ratatui::Frame) {
     match model.mode {
-        Mode::ViewingBoard | Mode::ViewingCardDetail | Mode::MovingCard => view_board(model, frame),
+        Mode::ViewingBoard
+        | Mode::ViewingCardDetail
+        | Mode::MovingCard
+        | Mode::ConfirmCardDeletion => view_board(model, frame),
         Mode::ViewingBoards => view_boards(model, frame),
     }
 }
@@ -934,48 +1006,124 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                 );
 
             frame.render_stateful_widget(list, column_layout[1], &mut state);
+        }
 
-            if model.mode == Mode::ViewingCardDetail
-                && let Some(card) = model.selected_card()
-            {
-                let block = Block::bordered()
-                    .title(Line::from(card.id.to_string()).left_aligned())
-                    .title(
-                        Line::from(format!(
-                            "created {}, updated {}",
-                            card.inserted_at, card.updated_at
-                        ))
-                        .right_aligned(),
-                    )
-                    .padding(Padding::uniform(1));
+        if model.mode == Mode::ViewingCardDetail
+            && let Some(card) = model.selected_card()
+        {
+            let block = Block::bordered()
+                .title(Line::from(card.id.to_string()).left_aligned())
+                .title(
+                    Line::from(format!(
+                        "created {}, updated {}",
+                        card.inserted_at, card.updated_at
+                    ))
+                    .right_aligned(),
+                )
+                .padding(Padding::uniform(1));
 
-                let title_style = Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            let title_style = Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
 
-                let area = popup_area(frame.area(), 60, 50);
+            let area = popup_area(frame.area(), 60, 50);
 
-                let wrapped = textwrap::wrap(&card.body, area.width as usize);
+            let wrapped = textwrap::wrap(&card.body, area.width as usize);
 
-                let body = wrapped.iter().map(|line| Line::from(line.to_string()));
+            let body = wrapped.iter().map(|line| Line::from(line.to_string()));
 
-                let mut lines = vec![Line::styled(&*card.title, title_style)];
-                lines.push(Line::from("\n\n"));
-                lines.extend(body);
+            let mut lines = vec![Line::styled(&*card.title, title_style)];
+            lines.push(Line::from("\n\n"));
+            lines.extend(body);
 
-                let paragraph = Paragraph::new(lines).block(block);
+            let paragraph = Paragraph::new(lines).block(block);
 
-                frame.render_widget(ratatui::widgets::Clear, area); //this clears out the background
-                frame.render_widget(paragraph, area);
+            frame.render_widget(ratatui::widgets::Clear, area); //this clears out the background
+            frame.render_widget(paragraph, area);
 
-                /// helper function to create a centered rect using up certain percentage of the available rect `r`
-                fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-                    let vertical =
-                        Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
-                    let horizontal =
-                        Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);
-                    let [area] = vertical.areas(area);
-                    let [area] = horizontal.areas(area);
-                    area
-                }
+            /// helper function to create a centered rect using up certain percentage of the available rect `r`
+            fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+                let vertical =
+                    Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
+                let horizontal =
+                    Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);
+                let [area] = vertical.areas(area);
+                let [area] = horizontal.areas(area);
+                area
+            }
+        }
+
+        if model.mode == Mode::ConfirmCardDeletion
+            && let Some(card) = model.selected_card()
+        {
+            let title_style = Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+
+            let block = Block::bordered()
+                .title(format!("Delete {}", &card.title))
+                .padding(Padding::uniform(1))
+                .title_style(title_style);
+
+            let area = popup_area(frame.area(), 30, 20);
+
+            let [left, right] = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+                .areas(area);
+
+            let left_text = {
+                let text = if model.confirmation_state == ConfirmationState::Yes {
+                    "[ Delete ]"
+                } else {
+                    "Delete"
+                };
+
+                Text::from(text).centered()
+            };
+
+            let right_text = {
+                let text = if model.confirmation_state == ConfirmationState::No {
+                    "[ Cancel ]"
+                } else {
+                    "Cancel"
+                };
+
+                Text::from(text).centered()
+            };
+
+            // Text::from("Delete").centered();
+            // let right_text = Text::from("Cancel").centered();
+
+            let left = center(
+                left,
+                Constraint::Length(left_text.width() as u16),
+                Constraint::Length(1),
+            );
+
+            let right = center(
+                right,
+                Constraint::Length(right_text.width() as u16),
+                Constraint::Length(1),
+            );
+
+            frame.render_widget(ratatui::widgets::Clear, area); //this clears out the background
+            frame.render_widget(left_text, left);
+            frame.render_widget(right_text, right);
+            frame.render_widget(block, area);
+
+            fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+                let vertical =
+                    Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
+                let horizontal =
+                    Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);
+                let [area] = vertical.areas(area);
+                let [area] = horizontal.areas(area);
+                area
+            }
+
+            fn center(area: Rect, horizontal: Constraint, vertical: Constraint) -> Rect {
+                let [area] = Layout::horizontal([horizontal])
+                    .flex(Flex::Center)
+                    .areas(area);
+                let [area] = Layout::vertical([vertical]).flex(Flex::Center).areas(area);
+                area
             }
         }
 
@@ -986,6 +1134,7 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                     Mode::ViewingBoard => "VIEWING BOARD",
                     Mode::ViewingCardDetail => "VIEWING CARD",
                     Mode::MovingCard => "MOVING CARD",
+                    Mode::ConfirmCardDeletion => "DELETING CARD",
                     Mode::ViewingBoards => "VIEWING BOARDS",
                 })
                 .left_aligned(),
@@ -1014,7 +1163,7 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
 /// We don't need to pass in a `model` to this function in this example
 /// but you might need it as your project evolves
 fn receive_event(model: &Model) -> anyhow::Result<Option<Message>> {
-    if crossterm::event::poll(Duration::from_millis(250))?
+    if crossterm::event::poll(Duration::from_millis(1000))?
         && let crossterm::event::Event::Key(key) = crossterm::event::read()?
         && key.kind == crossterm::event::KeyEventKind::Press
     {
@@ -1040,6 +1189,7 @@ fn handle_event(event: Event, model: &Model) -> Option<Message> {
                 KeyCode::Char('m') => Some(Message::MoveCardMode),
                 KeyCode::Char('n') => Some(Message::NewCard),
                 KeyCode::Char('e') => Some(Message::EditCard),
+                KeyCode::Char('d') => Some(Message::DeleteCard),
                 KeyCode::Char('b') => Some(Message::ViewBoardsMode),
                 KeyCode::Enter => Some(Message::ViewCardDetailMode),
                 _ => None,
@@ -1051,8 +1201,15 @@ fn handle_event(event: Event, model: &Model) -> Option<Message> {
                 KeyCode::Char('m') | KeyCode::Enter | KeyCode::Esc => Some(Message::ViewBoardMode),
                 _ => None,
             },
+            Mode::ConfirmCardDeletion => match key.code {
+                KeyCode::Char('h') | KeyCode::Left => Some(Message::NavigateLeft),
+                KeyCode::Char('l') | KeyCode::Right => Some(Message::NavigateRight),
+                KeyCode::Enter => Some(Message::ConfirmChoice),
+                _ => None,
+            },
             Mode::ViewingCardDetail => match key.code {
                 KeyCode::Enter | KeyCode::Esc => Some(Message::ViewBoardMode),
+                KeyCode::Char('q') => Some(Message::Quit),
                 _ => None,
             },
             Mode::ViewingBoards => match key.code {
@@ -1154,6 +1311,7 @@ where
 
                     model.mode = Mode::ViewingBoard;
                 }
+                Message::DeleteCard => model.confirm_card_delete()?,
                 Message::SetError(e) => {
                     model.error = e;
                     let internal_event_tx = model.internal_event_tx.clone();
@@ -1181,6 +1339,19 @@ where
                     }
                 }
             }
+            m => panic!("unhandled message: {:?}", m),
+        },
+        Mode::ConfirmCardDeletion => match msg {
+            Message::ConfirmChoice => match model.confirmation_state {
+                ConfirmationState::Yes => {
+                    model.delete_selected_card()?;
+                    model.mode = Mode::ViewingBoard;
+                    model.confirmation_state = ConfirmationState::No;
+                }
+                ConfirmationState::No => model.mode = Mode::ViewingBoard,
+            },
+            Message::NavigateLeft | Message::NavigateRight => model.toggle_confirmation_state(),
+            Message::ViewBoardMode => model.mode = Mode::ViewingBoard,
             m => panic!("unhandled message: {:?}", m),
         },
         Mode::ViewingBoards => match msg {
@@ -1391,7 +1562,12 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Card, Model, Options, RunningState, update};
+    use ratatui::Terminal;
+
+    use crate::{
+        Card, ConfirmationState, Mode, Model, Options, RunningState, update,
+        update_with_run_editor_fn,
+    };
 
     /// right now, we don't care about comparing whether cards
     /// have the same inserted_at and updated_at.
@@ -2352,5 +2528,61 @@ mod tests {
             update(&mut model, crate::Message::NavigateUp, &mut terminal).unwrap();
             assert_eq!(model.selected.board_index, Some(0));
         }
+    }
+
+    #[test]
+    fn delete_card() {
+        let mut model = Model::new(Options {
+            database_path: Some(":memory:".into()),
+        })
+        .unwrap();
+
+        model.create_column("Todo").unwrap();
+        // model.create_board("Board1", &["Todo"]).unwrap();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+        let update_result = update_with_run_editor_fn(
+            &mut model,
+            crate::Message::NewCard,
+            &mut terminal,
+            // replace default run_editor_fn with a stub that returns valid data
+            |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                Ok("Valid Title\n==========\n\nValid card body".to_string())
+            },
+        );
+
+        assert!(update_result.is_ok());
+
+        let card = model.selected_card().unwrap();
+
+        assert_eq!(
+            &Card {
+                id: 1,
+                title: "Valid Title".to_string(),
+                body: "Valid card body".to_string(),
+                inserted_at: "".to_string(),
+                updated_at: "".to_string()
+            },
+            card
+        );
+
+        let column = model.selected_column();
+        assert!(!column.cards.is_empty());
+
+        update(&mut model, crate::Message::DeleteCard, &mut terminal).unwrap();
+        assert_eq!(model.confirmation_state, ConfirmationState::No);
+        assert_eq!(model.mode, Mode::ConfirmCardDeletion);
+
+        let column = model.selected_column();
+        assert!(!column.cards.is_empty());
+
+        update(&mut model, crate::Message::NavigateLeft, &mut terminal).unwrap();
+        assert_eq!(model.confirmation_state, ConfirmationState::Yes);
+
+        update(&mut model, crate::Message::ConfirmChoice, &mut terminal).unwrap();
+        let column = model.selected_column();
+        assert!(column.cards.is_empty());
     }
 }
