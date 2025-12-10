@@ -70,6 +70,20 @@ impl Model {
         })
     }
 
+    fn switch_to_viewing_boards_mode(&mut self) -> anyhow::Result<()> {
+        self.mode = Mode::ViewingBoards;
+        self.board_metas = self.repo.get_board_metas()?;
+        self.board = None;
+        if !self.board_metas.is_empty() {
+            self.selected.board_index = Some(0);
+            if let Some(board_index) = self.selected.board_index {
+                self.selected.board_id = self.board_metas[board_index].id
+            }
+        }
+
+        Ok(())
+    }
+
     fn selected_column_mut(&mut self) -> &mut Column {
         let board = self.board.as_mut().unwrap();
         &mut board.columns[self.selected.column_index]
@@ -1011,23 +1025,10 @@ where
     match model.mode {
         Mode::ViewingBoard => {
             match msg {
-                Message::ViewBoardsMode => {
-                    model.mode = Mode::ViewingBoards;
-                    model.board_metas = model.repo.get_board_metas()?;
-                    model.board = None;
-                    if !model.board_metas.is_empty() {
-                        model.selected.board_index = Some(0);
-                        if let Some(board_index) = model.selected.board_index {
-                            model.selected.board_id = model.board_metas[board_index].id
-                        }
-                    }
-                }
+                Message::ViewBoardsMode => model.switch_to_viewing_boards_mode()?,
                 Message::MoveCardMode => model.mode = Mode::MovingCard,
                 Message::ViewCardDetailMode => model.mode = Mode::ViewingCardDetail,
-                Message::Quit => {
-                    // You can handle cleanup and exit here
-                    model.running_state = RunningState::Done;
-                }
+                Message::Quit => model.running_state = RunningState::Done,
                 Message::NavigateLeft => model.navigate_left(),
                 Message::NavigateDown => {
                     model.selected.card_index = model.selected.card_index.map(|i| {
@@ -2095,6 +2096,113 @@ mod tests {
 
             assert_eq!(model.running_state, RunningState::Running);
             assert_eq!(model.mode, Mode::ViewingBoard);
+        }
+    }
+
+    mod boards_view {
+        use crate::{Mode, Model, Options, update};
+
+        #[test]
+        fn navigate_down_with_one_board() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.create_board("Board1", &["Todo"]).unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+
+            assert_eq!(model.mode, Mode::ViewingBoards);
+
+            assert_eq!(model.selected.board_index, Some(0));
+
+            assert!(model.board.is_none());
+
+            update(&mut model, crate::Message::NavigateDown, &mut terminal).unwrap();
+
+            assert_eq!(model.selected.board_index, Some(0));
+        }
+
+        #[test]
+        fn navigate_down_with_two_boards() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.create_board("Board1", &["Todo"]).unwrap();
+            model.create_board("Board2", &["Todo"]).unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+
+            assert_eq!(model.mode, Mode::ViewingBoards);
+
+            assert_eq!(model.selected.board_index, Some(0));
+
+            assert!(model.board.is_none());
+
+            update(&mut model, crate::Message::NavigateDown, &mut terminal).unwrap();
+
+            assert_eq!(model.selected.board_index, Some(1));
+        }
+
+        #[test]
+        fn navigate_up_with_one_board() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.create_board("Board1", &["Todo"]).unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+
+            assert_eq!(model.mode, Mode::ViewingBoards);
+
+            assert_eq!(model.selected.board_index, Some(0));
+
+            assert!(model.board.is_none());
+
+            update(&mut model, crate::Message::NavigateUp, &mut terminal).unwrap();
+
+            assert_eq!(model.selected.board_index, Some(0));
+        }
+
+        #[test]
+        fn navigate_up_with_two_boards() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.create_board("Board1", &["Todo"]).unwrap();
+            model.create_board("Board2", &["Todo"]).unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+
+            assert_eq!(model.mode, Mode::ViewingBoards);
+
+            assert_eq!(model.selected.board_index, Some(0));
+
+            assert!(model.board.is_none());
+
+            update(&mut model, crate::Message::NavigateDown, &mut terminal).unwrap();
+            assert_eq!(model.selected.board_index, Some(1));
+            update(&mut model, crate::Message::NavigateUp, &mut terminal).unwrap();
+            assert_eq!(model.selected.board_index, Some(0));
         }
     }
 }
