@@ -1,6 +1,5 @@
 // TODO
 // - allow deleting of cards with popup confirmation
-// - load the most recently used board on startup
 
 use anyhow::anyhow;
 use clap::Parser;
