@@ -8,7 +8,7 @@ use crossterm::event::KeyCode;
 use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::prelude::Backend;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
 use regex::Regex;
@@ -939,7 +939,7 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                 && let Some(card) = model.selected_card()
             {
                 let block = Block::bordered()
-                    .title(Line::from(format!("{} - {}", card.id, card.title)).left_aligned())
+                    .title(Line::from(card.id.to_string()).left_aligned())
                     .title(
                         Line::from(format!(
                             "created {}, updated {}",
@@ -948,9 +948,20 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                         .right_aligned(),
                     )
                     .padding(Padding::uniform(1));
-                let paragraph = Paragraph::new(&*card.body).block(block);
+
+                let title_style = Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
 
                 let area = popup_area(frame.area(), 60, 50);
+
+                let wrapped = textwrap::wrap(&card.body, area.width as usize);
+
+                let body = wrapped.iter().map(|line| Line::from(line.to_string()));
+
+                let mut lines = vec![Line::styled(&*card.title, title_style)];
+                lines.push(Line::from("\n\n"));
+                lines.extend(body);
+
+                let paragraph = Paragraph::new(lines).block(block);
 
                 frame.render_widget(ratatui::widgets::Clear, area); //this clears out the background
                 frame.render_widget(paragraph, area);
@@ -1162,7 +1173,14 @@ where
         Mode::MovingCard => match msg {
             Message::MoveCardLeft => move_selected_card_left(model)?,
             Message::MoveCardRight => move_selected_card_right(model)?,
-            Message::ViewBoardMode => model.mode = Mode::ViewingBoard,
+            Message::ViewBoardMode => {
+                model.mode = Mode::ViewingBoard;
+                if let Some(board) = model.board.as_mut() {
+                    for column in &mut board.columns {
+                        column.cards.sort_unstable_by(|a, b| b.id.cmp(&a.id));
+                    }
+                }
+            }
             m => panic!("unhandled message: {:?}", m),
         },
         Mode::ViewingBoards => match msg {
