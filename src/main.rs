@@ -104,22 +104,24 @@ impl Model {
         Ok(())
     }
 
-    fn selected_column_mut(&mut self) -> &mut Column {
+    fn selected_column_mut(&mut self) -> Option<&mut Column> {
         let board = self.board.as_mut().unwrap();
-        &mut board.columns[self.selected.column_index]
+        board.columns.get_mut(self.selected.column_index)
     }
 
     fn add_card_to_selected_column(&mut self, card: Card) {
-        let current_column = self.selected_column_mut();
-        current_column.cards.push(card);
-        current_column
-            .cards
-            .sort_unstable_by(|a, b| b.id.cmp(&a.id));
+        if let Some(current_column) = self.selected_column_mut() {
+            current_column.cards.push(card);
+            current_column
+                .cards
+                .sort_unstable_by(|a, b| b.id.cmp(&a.id));
+        }
     }
 
     fn selected_card(&self) -> Option<&Card> {
         if let Some(card_index) = self.selected.card_index {
-            self.selected_column().cards.get(card_index)
+            self.selected_column()
+                .and_then(|column| column.cards.get(card_index))
         } else {
             None
         }
@@ -128,9 +130,7 @@ impl Model {
     fn selected_card_id(&self) -> Option<u64> {
         if let Some(card_index) = self.selected.card_index {
             self.selected_column()
-                .cards
-                .get(card_index)
-                .map(|card| card.id)
+                .and_then(|column| column.cards.get(card_index).map(|card| card.id))
         } else {
             None
         }
@@ -142,15 +142,16 @@ impl Model {
 
     fn selected_card_mut(&mut self) -> Option<&mut Card> {
         if let Some(card_index) = self.selected.card_index {
-            Some(&mut self.selected_column_mut().cards[card_index])
+            self.selected_column_mut()
+                .and_then(|column| column.cards.get_mut(card_index))
         } else {
             None
         }
     }
 
-    fn selected_column(&self) -> &Column {
+    fn selected_column(&self) -> Option<&Column> {
         let board = self.board.as_ref().unwrap();
-        &board.columns[self.selected.column_index]
+        board.columns.get(self.selected.column_index)
     }
 
     fn navigate_left(&mut self) {
@@ -1260,7 +1261,9 @@ where
                 Message::ViewBoardsMode => model.switch_to_viewing_boards_mode()?,
                 Message::MoveCardMode => model.mode = Mode::MovingCard,
                 Message::ViewCardDetailMode => {
-                    if !model.selected_column().cards.is_empty() {
+                    if let Some(column) = model.selected_column()
+                        && !column.cards.is_empty()
+                    {
                         model.mode = Mode::ViewingCardDetail
                     }
                 }
@@ -1270,7 +1273,10 @@ where
                     model.selected.card_index = model.selected.card_index.map(|i| {
                         min(
                             i.saturating_add(1),
-                            model.selected_column().cards.len().saturating_sub(1),
+                            model
+                                .selected_column()
+                                .map(|column| column.cards.len().saturating_sub(1))
+                                .unwrap_or(usize::MAX),
                         )
                     })
                 }
@@ -2372,10 +2378,43 @@ mod tests {
     }
 
     mod switch_to_view_card_detail_mode {
-        use crate::{Mode, Model, Options, RunningState, update};
+        use crate::{Card, Mode, Model, Options, RunningState, update};
 
         #[test]
-        fn switches() {
+        fn switches_when_column_is_not_empty() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.create_column("Todo").unwrap();
+
+            model.add_card_to_selected_column(Card {
+                id: 1,
+                title: "Title".to_string(),
+                body: "Body".to_string(),
+                inserted_at: "".to_string(),
+                updated_at: "".to_string(),
+            });
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            assert_eq!(model.mode, Mode::ViewingBoard);
+
+            update(
+                &mut model,
+                crate::Message::ViewCardDetailMode,
+                &mut terminal,
+            )
+            .unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(model.mode, Mode::ViewingCardDetail);
+        }
+
+        #[test]
+        fn does_not_switch_when_column_is_empty() {
             let mut model = Model::new(Options {
                 database_path: Some(":memory:".into()),
             })
@@ -2394,7 +2433,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(model.running_state, RunningState::Running);
-            assert_eq!(model.mode, Mode::ViewingCardDetail);
+            assert_eq!(model.mode, Mode::ViewingBoard);
         }
     }
 
@@ -2572,21 +2611,21 @@ mod tests {
             card
         );
 
-        let column = model.selected_column();
+        let column = model.selected_column().unwrap();
         assert!(!column.cards.is_empty());
 
         update(&mut model, crate::Message::DeleteCard, &mut terminal).unwrap();
         assert_eq!(model.confirmation_state, ConfirmationState::No);
         assert_eq!(model.mode, Mode::ConfirmCardDeletion);
 
-        let column = model.selected_column();
+        let column = model.selected_column().unwrap();
         assert!(!column.cards.is_empty());
 
         update(&mut model, crate::Message::NavigateLeft, &mut terminal).unwrap();
         assert_eq!(model.confirmation_state, ConfirmationState::Yes);
 
         update(&mut model, crate::Message::ConfirmChoice, &mut terminal).unwrap();
-        let column = model.selected_column();
+        let column = model.selected_column().unwrap();
         assert!(column.cards.is_empty());
     }
 }
