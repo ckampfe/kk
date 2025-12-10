@@ -48,7 +48,7 @@ impl Model {
 
         let (tx, rx) = std::sync::mpsc::channel();
 
-        let board = repo.load_board(1)?;
+        let board = repo.load_most_recently_viewed_board()?;
 
         Ok(Self {
             board_metas: vec![],
@@ -268,7 +268,8 @@ impl Repo {
                 id integer primary key,
                 name text not null,
                 inserted_at timestamp not null default current_timestamp,
-                updated_at timestamp not null default current_timestamp
+                updated_at timestamp not null default current_timestamp,
+                viewed_at timestamp not null default current_timestamp
             );
 
             create unique index if not exists boards_name on boards (name);
@@ -335,7 +336,7 @@ impl Repo {
         inner join statuses
             on statuses.board_id = boards.id
         group by boards.id, boards.name
-        order by boards.name asc
+        order by boards.viewed_at desc
         ",
         )?;
 
@@ -359,17 +360,36 @@ impl Repo {
         Ok(boards)
     }
 
-    fn load_board(&self, board_id: u64) -> anyhow::Result<Board> {
-        let mut board_s = self.conn.prepare(
-            "
+    fn load_board(&mut self, board_id: u64) -> anyhow::Result<Board> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let board_name = {
+            let mut board_s = tx.prepare(
+                "
         select
             name
         from boards
         where id = ?
         ",
+            )?;
+
+            let board_name: String = board_s.query_one([board_id], |row| row.get(0))?;
+
+            board_name
+        };
+
+        tx.execute(
+            "
+        update boards
+        set viewed_at = current_timestamp
+        where id = ?
+        ",
+            [board_id],
         )?;
 
-        let board_name: String = board_s.query_one([board_id], |row| row.get(0))?;
+        tx.commit()?;
 
         let columns = self.get_cards_for_board(board_id)?;
 
@@ -664,6 +684,30 @@ impl Repo {
         tx.commit()?;
 
         self.load_board(board_id)
+    }
+
+    fn load_most_recently_viewed_board(&self) -> anyhow::Result<Board> {
+        let mut board_s = self.conn.prepare(
+            "
+        select
+            id,
+            name
+        from boards
+        order by viewed_at desc
+        limit 1
+        ",
+        )?;
+
+        let (board_id, board_name): (u64, String) =
+            board_s.query_one([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        let columns = self.get_cards_for_board(board_id)?;
+
+        Ok(Board {
+            id: board_id,
+            name: board_name,
+            columns,
+        })
     }
 }
 
