@@ -1,6 +1,3 @@
-// TODO
-// - allow deleting of cards with popup confirmation
-
 use anyhow::anyhow;
 use clap::Parser;
 use crossterm::ExecutableCommand;
