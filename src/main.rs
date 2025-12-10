@@ -27,6 +27,9 @@ struct BoardMeta {
     id: u64,
     name: String,
     columns: Vec<String>,
+    inserted_at: String,
+    updated_at: String,
+    viewed_at: String,
 }
 
 #[derive(Debug)]
@@ -335,7 +338,10 @@ impl Repo {
         select
             boards.id,
             boards.name,
-            group_concat(statuses.name, '|' order by statuses.column_order)
+            group_concat(statuses.name, '|' order by statuses.column_order),
+            boards.inserted_at,
+            boards.updated_at,
+            boards.viewed_at
         from boards
         inner join statuses
             on statuses.board_id = boards.id
@@ -352,6 +358,9 @@ impl Repo {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 columns: columns_names,
+                inserted_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                viewed_at: row.get(5)?,
             })
         })?;
 
@@ -845,7 +854,12 @@ fn view_boards(model: &mut Model, frame: &mut ratatui::Frame<'_>) {
     let list_items = model
         .board_metas
         .iter()
-        .map(|board| ListItem::new(&*board.name))
+        .map(|board| {
+            ListItem::new(format!(
+                "{:<30}{:<30}{:<30}{:<30}",
+                &*board.name, &*board.updated_at, &*board.viewed_at, &*board.inserted_at
+            ))
+        })
         .collect::<Vec<_>>();
 
     const PINK: Color = Color::Rgb(255, 150, 167);
@@ -857,7 +871,10 @@ fn view_boards(model: &mut Model, frame: &mut ratatui::Frame<'_>) {
             Block::new()
                 .border_type(ratatui::widgets::BorderType::Rounded)
                 .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(Color::Black)),
+                .border_style(Style::default().fg(Color::Black))
+                .title(
+                    "──name──────────────────────────last updated──────────────────last viewed───────────────────created",
+                ),
         );
 
     frame.render_widget(Paragraph::new("Boards"), layout[0]);
@@ -1208,6 +1225,7 @@ where
     Ok(None)
 }
 
+// TODO move this onto Model impl
 fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
     if let Some(board) = &mut model.board
         && let Some(selected_card_index) = model.selected.card_index
@@ -1235,6 +1253,7 @@ fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
     Ok(())
 }
 
+// TODO move this onto Model impl
 fn move_selected_card_right(model: &mut Model) -> anyhow::Result<()> {
     if let Some(board) = &mut model.board
         && let Some(selected_card_index) = model.selected.card_index
