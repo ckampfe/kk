@@ -189,9 +189,13 @@ impl Model {
     }
 
     fn create_board(&mut self, name: &str, column_names: &[&str]) -> anyhow::Result<()> {
-        self.repo.create_board(name, column_names)?;
-        self.board_metas = self.repo.get_board_metas()?;
-        Ok(())
+        if !column_names.is_empty() {
+            self.repo.create_board(name, column_names)?;
+            self.board_metas = self.repo.get_board_metas()?;
+            Ok(())
+        } else {
+            Err(anyhow!("Board must have at least 1 column"))
+        }
     }
 
     fn update_selected_board(
@@ -1360,6 +1364,70 @@ mod tests {
     impl PartialEq for Card {
         fn eq(&self, other: &Self) -> bool {
             self.id == other.id && self.title == other.title && self.body == other.body
+        }
+    }
+
+    mod create_board {
+        use ratatui::Terminal;
+
+        use crate::{Model, Options, RunningState, update, update_with_run_editor_fn};
+
+        #[test]
+        fn with_zero_columns() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.create_board("Board1", &["Todo"]).unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+
+            let update_result = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns invalid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Some Board Name\n==========\n\n".to_string())
+                },
+            );
+
+            assert!(update_result.is_err());
+
+            assert_eq!(model.running_state, RunningState::Running);
+        }
+
+        #[test]
+        fn with_at_least_one_column() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            model.create_board("Board1", &["Todo"]).unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+
+            let update_result = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns invalid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Some Board Name\n==========\n\n- Todo".to_string())
+                },
+            );
+
+            assert!(update_result.is_ok());
+
+            assert_eq!(model.running_state, RunningState::Running);
         }
     }
 
