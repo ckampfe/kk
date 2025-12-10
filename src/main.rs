@@ -293,6 +293,18 @@ impl Repo {
 
             create index if not exists cards_board_id on cards (board_id);
             create index if not exists cards_status_id on cards (status_id);
+
+            create trigger if not exists cards_updated after update on cards
+            for each row
+            begin
+                update cards
+                set updated_at = current_timestamp
+                where cards.id = NEW.id;
+
+                update boards
+                set updated_at = current_timestamp
+                where boards.id = NEW.board_id;
+            end
     ",
         )?;
         Ok(())
@@ -429,7 +441,7 @@ impl Repo {
         let card = self.conn.query_row(
             "
         insert into cards (board_id, status_id, title, body) values (?, ?, ?, ?)
-        returning id
+        returning id, inserted_at, updated_at;
         ",
             params![board_id, status_id, title, body],
             |row| {
@@ -437,6 +449,8 @@ impl Repo {
                     id: row.get(0)?,
                     title: title.to_string(),
                     body: body.to_string(),
+                    inserted_at: row.get(1)?,
+                    updated_at: row.get(2)?,
                 })
             },
         )?;
@@ -450,7 +464,9 @@ impl Repo {
             select
                 cards.id,
                 cards.title,
-                cards.body
+                cards.body,
+                cards.inserted_at,
+                cards.updated_at
             from cards
             inner join statuses
                 on statuses.id = cards.status_id
@@ -465,6 +481,8 @@ impl Repo {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 body: row.get(2)?,
+                inserted_at: row.get(3)?,
+                updated_at: row.get(4)?,
             })
         })?;
 
@@ -477,7 +495,7 @@ impl Repo {
         Ok(cards)
     }
 
-    fn update_card(&self, card_id: u64, title: &str, body: &str) -> anyhow::Result<()> {
+    fn update_card(&mut self, card_id: u64, title: &str, body: &str) -> anyhow::Result<String> {
         self.conn.execute(
             "
         update cards
@@ -489,7 +507,18 @@ impl Repo {
             params![card_id, title, body],
         )?;
 
-        Ok(())
+        let mut updated_at_s = self.conn.prepare(
+            "
+        select
+            updated_at
+        from cards
+        where id = ?
+        ",
+        )?;
+
+        let updated_at = updated_at_s.query_one([card_id], |row| row.get(0))?;
+
+        Ok(updated_at)
     }
 
     fn set_card_status(
@@ -660,11 +689,13 @@ impl Display for Column {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 struct Card {
     id: u64,
     title: String,
     body: String,
+    inserted_at: String,
+    updated_at: String,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -830,7 +861,14 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                 && let Some(card) = model.selected_card()
             {
                 let block = Block::bordered()
-                    .title(format!("{} - {}", card.id, card.title))
+                    .title(Line::from(format!("{} - {}", card.id, card.title)).left_aligned())
+                    .title(
+                        Line::from(format!(
+                            "created {}, updated {}",
+                            card.inserted_at, card.updated_at
+                        ))
+                        .right_aligned(),
+                    )
                     .padding(Padding::uniform(1));
                 let paragraph = Paragraph::new(&*card.body).block(block);
 
@@ -1028,12 +1066,13 @@ where
 
                         let (title, body) = parse_raw_card_text(&raw_card_text)?;
 
-                        model.repo.update_card(card.id, title, body)?;
+                        let updated_at = model.repo.update_card(card.id, title, body)?;
 
                         // dumb but necessary to reborrow because we previously borrow the model immutably
                         if let Some(card) = model.selected_card_mut() {
                             card.title = title.to_string();
                             card.body = body.to_string();
+                            card.updated_at = updated_at;
                         }
                     }
 
@@ -1267,7 +1306,17 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Model, Options, RunningState, update};
+    use crate::{Card, Model, Options, RunningState, update};
+
+    /// right now, we don't care about comparing whether cards
+    /// have the same inserted_at and updated_at.
+    ///
+    /// we don't even use PartialEq in application code
+    impl PartialEq for Card {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id && self.title == other.title && self.body == other.body
+        }
+    }
 
     mod new_card {
         use crate::{Card, Model, Options, RunningState, update_with_run_editor_fn};
@@ -1332,7 +1381,9 @@ mod tests {
                 vec![Card {
                     id: 1,
                     title: "Valid Title".to_string(),
-                    body: "Valid card body".to_string()
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
                 }]
             );
 
@@ -1344,7 +1395,9 @@ mod tests {
                 vec![Card {
                     id: 1,
                     title: "Valid Title".to_string(),
-                    body: "Valid card body".to_string()
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
                 }]
             );
 
@@ -1403,7 +1456,9 @@ mod tests {
                 vec![Card {
                     id: 1,
                     title: "Valid Title".to_string(),
-                    body: "Valid card body".to_string()
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
                 }]
             );
 
@@ -1415,7 +1470,9 @@ mod tests {
                 vec![Card {
                     id: 1,
                     title: "Valid Title".to_string(),
-                    body: "Valid card body".to_string()
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
                 }]
             );
 
@@ -1470,7 +1527,9 @@ mod tests {
                 vec![Card {
                     id: 1,
                     title: "Valid Title".to_string(),
-                    body: "Valid card body".to_string()
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
                 }]
             );
 
@@ -1482,7 +1541,9 @@ mod tests {
                 vec![Card {
                     id: 1,
                     title: "Valid Title".to_string(),
-                    body: "Valid card body".to_string()
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
                 }]
             );
 
@@ -1549,6 +1610,8 @@ mod tests {
                             id: 1,
                             title: "great card".to_string(),
                             body: "great body".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         }],
                     },
                     Column {
@@ -1557,6 +1620,8 @@ mod tests {
                             id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         }],
                     },
                 ],
@@ -1603,6 +1668,8 @@ mod tests {
                             id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         }],
                     },
                 ],
@@ -1673,6 +1740,8 @@ mod tests {
                             id: 1,
                             title: "great card".to_string(),
                             body: "great body".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         }],
                     },
                     Column {
@@ -1681,6 +1750,8 @@ mod tests {
                             id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         }],
                     },
                 ],
@@ -1723,6 +1794,8 @@ mod tests {
                             id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         }],
                     },
                     Column {
@@ -1772,6 +1845,8 @@ mod tests {
                         id: 2,
                         title: "title 2".to_string(),
                         body: "body 2".to_string(),
+                        inserted_at: "".to_string(),
+                        updated_at: "".to_string(),
                     }],
                 }],
             });
@@ -1813,11 +1888,15 @@ mod tests {
                             id: 1,
                             title: "title 1".to_string(),
                             body: "body 1".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         },
                         Card {
                             id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         },
                     ],
                 }],
@@ -1863,6 +1942,8 @@ mod tests {
                         id: 2,
                         title: "title 2".to_string(),
                         body: "body 2".to_string(),
+                        inserted_at: "".to_string(),
+                        updated_at: "".to_string(),
                     }],
                 }],
             });
@@ -1904,11 +1985,15 @@ mod tests {
                             id: 1,
                             title: "title 1".to_string(),
                             body: "body 1".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         },
                         Card {
                             id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
+                            inserted_at: "".to_string(),
+                            updated_at: "".to_string(),
                         },
                     ],
                 }],
