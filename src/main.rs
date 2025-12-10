@@ -1259,7 +1259,11 @@ where
             match msg {
                 Message::ViewBoardsMode => model.switch_to_viewing_boards_mode()?,
                 Message::MoveCardMode => model.mode = Mode::MovingCard,
-                Message::ViewCardDetailMode => model.mode = Mode::ViewingCardDetail,
+                Message::ViewCardDetailMode => {
+                    if !model.selected_column().cards.is_empty() {
+                        model.mode = Mode::ViewingCardDetail
+                    }
+                }
                 Message::Quit => model.running_state = RunningState::Done,
                 Message::NavigateLeft => model.navigate_left(),
                 Message::NavigateDown => {
