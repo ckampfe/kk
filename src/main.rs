@@ -1145,6 +1145,58 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
             if let Some(e) = &model.error {
                 modeline_text.push_str(" - Error: ");
                 modeline_text.push_str(&e.replace("\n", " "));
+            } else {
+                let formatted = match model.mode {
+                    Mode::ViewingBoard => [
+                        ("[h,j,k,l/arrows]", "move"),
+                        ("[q]", "quit"),
+                        ("[enter]", "view card"),
+                        ("[m]", "move card"),
+                        ("[n]", "new card"),
+                        ("[e]", "edit card"),
+                        ("[d]", "delete card"),
+                        ("[b]", "view boards"),
+                    ]
+                    .iter()
+                    .map(|(k, action)| format!("{} - {}", k, action))
+                    .collect::<Vec<_>>(),
+                    Mode::ViewingCardDetail => {
+                        [("[enter/esc]", "close detail view"), ("[q]", "quit")]
+                            .iter()
+                            .map(|(k, action)| format!("{} - {}", k, action))
+                            .collect::<Vec<_>>()
+                    }
+                    Mode::MovingCard => [
+                        ("[h/left]", "move card left"),
+                        ("[l/right]", "move card right"),
+                        ("[q]", "quit"),
+                        ("[m|enter|esc]", "close card detail view"),
+                    ]
+                    .iter()
+                    .map(|(k, action)| format!("{} - {}", k, action))
+                    .collect::<Vec<_>>(),
+                    Mode::ViewingBoards => [
+                        ("[j/down]", "down"),
+                        ("[k/up]", "up"),
+                        ("[enter]", "view board"),
+                        ("[n]", "new board"),
+                        ("[e]", "edit board"),
+                        ("[q]", "quit"),
+                    ]
+                    .iter()
+                    .map(|(k, action)| format!("{} - {}", k, action))
+                    .collect::<Vec<_>>(),
+                    Mode::ConfirmCardDeletion => [
+                        ("[h/left]", "left"),
+                        ("[l/right]", "right"),
+                        ("[enter]", "confirm selection"),
+                    ]
+                    .iter()
+                    .map(|(k, action)| format!("{} - {}", k, action))
+                    .collect::<Vec<_>>(),
+                };
+
+                modeline_text.push_str(&formatted.join(" │ "));
             }
 
             modeline_text
