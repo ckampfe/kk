@@ -308,6 +308,7 @@ impl Repo {
             create table if not exists boards (
                 id integer primary key,
                 name text not null,
+                card_id integer not null default 1,
                 inserted_at timestamp not null default current_timestamp,
                 updated_at timestamp not null default current_timestamp,
                 viewed_at timestamp not null default current_timestamp
@@ -334,6 +335,7 @@ impl Repo {
 
             create table if not exists cards (
                 id integer primary key,
+                external_id integer not null,
                 board_id integer not null,
                 title text not null,
                 status_id integer not null,
@@ -503,8 +505,12 @@ impl Repo {
         Ok(board_id)
     }
 
-    fn insert_card(&self, board_id: u64, title: &str, body: &str) -> anyhow::Result<Card> {
-        let status_id: Result<u64, rusqlite::Error> = self.conn.query_one(
+    fn insert_card(&mut self, board_id: u64, title: &str, body: &str) -> anyhow::Result<Card> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let status_id: u64 = tx.query_one(
             "
         select
             id
@@ -515,19 +521,29 @@ impl Repo {
         ",
             [board_id],
             |row| row.get(0),
-        );
+        )?;
 
-        let status_id = status_id.unwrap();
-
-        let card = self.conn.query_row(
+        let external_card_id: u64 = tx.query_one(
             "
-        insert into cards (board_id, status_id, title, body) values (?, ?, ?, ?)
+        select
+            card_id
+        from boards
+        where id = ?
+        ",
+            [board_id],
+            |row| row.get(0),
+        )?;
+
+        let card = tx.query_row(
+            "
+        insert into cards (external_id, board_id, status_id, title, body) values (?, ?, ?, ?, ?)
         returning id, inserted_at, updated_at;
         ",
-            params![board_id, status_id, title, body],
+            params![external_card_id, board_id, status_id, title, body],
             |row| {
                 Ok(Card {
                     id: row.get(0)?,
+                    external_id: external_card_id,
                     title: title.to_string(),
                     body: body.to_string(),
                     inserted_at: row.get(1)?,
@@ -535,6 +551,17 @@ impl Repo {
                 })
             },
         )?;
+
+        tx.execute(
+            "
+            update boards
+            set card_id = card_id + 1
+            where id = ?;
+        ",
+            [board_id],
+        )?;
+
+        tx.commit()?;
 
         Ok(card)
     }
@@ -544,6 +571,7 @@ impl Repo {
             "
             select
                 cards.id,
+                cards.external_id,
                 cards.title,
                 cards.body,
                 cards.inserted_at,
@@ -560,10 +588,11 @@ impl Repo {
         let cards_iter = s.query_map(params![board_id, column_name], |row| {
             Ok(Card {
                 id: row.get(0)?,
-                title: row.get(1)?,
-                body: row.get(2)?,
-                inserted_at: row.get(3)?,
-                updated_at: row.get(4)?,
+                external_id: row.get(1)?,
+                title: row.get(2)?,
+                body: row.get(3)?,
+                inserted_at: row.get(4)?,
+                updated_at: row.get(5)?,
             })
         })?;
 
@@ -775,6 +804,7 @@ impl Display for Column {
 #[derive(Debug, Default)]
 struct Card {
     id: u64,
+    external_id: u64,
     title: String,
     body: String,
     inserted_at: String,
@@ -932,7 +962,7 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                 .cards
                 .iter()
                 .map(|card| {
-                    let s = format!("{} {}", card.id, card.title);
+                    let s = format!("{} {}", card.external_id, card.title);
                     ListItem::new(Text::from(textwrap::fill(
                         &s,
                         (column_layout[1].width as usize).saturating_sub(2),
@@ -959,7 +989,7 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
             && let Some(card) = model.selected_card()
         {
             let block = Block::bordered()
-                .title(Line::from(card.id.to_string()).left_aligned())
+                .title(Line::from(card.external_id.to_string()).left_aligned())
                 .title(
                     Line::from(format!(
                         "created {}, updated {}",
@@ -1771,6 +1801,7 @@ mod tests {
                 model.board.unwrap().columns[0].cards,
                 vec![Card {
                     id: 1,
+                    external_id: 1,
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -1785,6 +1816,7 @@ mod tests {
                 model.repo.cards_for_column(1, "Todo").unwrap(),
                 vec![Card {
                     id: 1,
+                    external_id: 1,
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -1846,6 +1878,7 @@ mod tests {
                 model.board.unwrap().columns[0].cards,
                 vec![Card {
                     id: 1,
+                    external_id: 1,
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -1860,6 +1893,7 @@ mod tests {
                 model.repo.cards_for_column(1, "Todo").unwrap(),
                 vec![Card {
                     id: 1,
+                    external_id: 1,
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -1914,9 +1948,9 @@ mod tests {
 
             assert_eq!(
                 model.board.unwrap().columns[0].cards,
-                // model.board.unwrap().columns["Todo"],
                 vec![Card {
                     id: 1,
+                    external_id: 1,
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -1931,6 +1965,7 @@ mod tests {
                 model.repo.cards_for_column(1, "Todo").unwrap(),
                 vec![Card {
                     id: 1,
+                    external_id: 1,
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -1999,6 +2034,7 @@ mod tests {
                         name: "Todo".to_string(),
                         cards: vec![Card {
                             id: 1,
+                            external_id: 1,
                             title: "great card".to_string(),
                             body: "great body".to_string(),
                             inserted_at: "".to_string(),
@@ -2009,6 +2045,7 @@ mod tests {
                         name: "Doing".to_string(),
                         cards: vec![Card {
                             id: 2,
+                            external_id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2057,6 +2094,7 @@ mod tests {
                         name: "Doing".to_string(),
                         cards: vec![Card {
                             id: 2,
+                            external_id: 1,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2129,6 +2167,7 @@ mod tests {
                         name: "Todo".to_string(),
                         cards: vec![Card {
                             id: 1,
+                            external_id: 1,
                             title: "great card".to_string(),
                             body: "great body".to_string(),
                             inserted_at: "".to_string(),
@@ -2139,6 +2178,7 @@ mod tests {
                         name: "Doing".to_string(),
                         cards: vec![Card {
                             id: 2,
+                            external_id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2183,6 +2223,7 @@ mod tests {
                         name: "Todo".to_string(),
                         cards: vec![Card {
                             id: 2,
+                            external_id: 1,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2234,6 +2275,7 @@ mod tests {
                     name: "Todo".to_string(),
                     cards: vec![Card {
                         id: 2,
+                        external_id: 1,
                         title: "title 2".to_string(),
                         body: "body 2".to_string(),
                         inserted_at: "".to_string(),
@@ -2277,6 +2319,7 @@ mod tests {
                     cards: vec![
                         Card {
                             id: 1,
+                            external_id: 1,
                             title: "title 1".to_string(),
                             body: "body 1".to_string(),
                             inserted_at: "".to_string(),
@@ -2284,6 +2327,7 @@ mod tests {
                         },
                         Card {
                             id: 2,
+                            external_id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2331,6 +2375,7 @@ mod tests {
                     name: "Todo".to_string(),
                     cards: vec![Card {
                         id: 2,
+                        external_id: 1,
                         title: "title 2".to_string(),
                         body: "body 2".to_string(),
                         inserted_at: "".to_string(),
@@ -2374,6 +2419,7 @@ mod tests {
                     cards: vec![
                         Card {
                             id: 1,
+                            external_id: 1,
                             title: "title 1".to_string(),
                             body: "body 1".to_string(),
                             inserted_at: "".to_string(),
@@ -2381,6 +2427,7 @@ mod tests {
                         },
                         Card {
                             id: 2,
+                            external_id: 2,
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2447,6 +2494,7 @@ mod tests {
 
             model.add_card_to_selected_column(Card {
                 id: 1,
+                external_id: 1,
                 title: "Title".to_string(),
                 body: "Body".to_string(),
                 inserted_at: "".to_string(),
@@ -2659,6 +2707,7 @@ mod tests {
         assert_eq!(
             &Card {
                 id: 1,
+                external_id: 1,
                 title: "Valid Title".to_string(),
                 body: "Valid card body".to_string(),
                 inserted_at: "".to_string(),
@@ -2683,5 +2732,133 @@ mod tests {
         update(&mut model, crate::Message::ConfirmChoice, &mut terminal).unwrap();
         let column = model.selected_column().unwrap();
         assert!(column.cards.is_empty());
+    }
+
+    #[test]
+    fn card_ids_are_unique_and_increment_per_board() {
+        let mut model = Model::new(Options {
+            database_path: Some(":memory:".into()),
+        })
+        .unwrap();
+
+        model.create_board("Board2", &["Todo"]).unwrap();
+        model.create_board("Board1", &["Todo"]).unwrap();
+
+        assert_eq!(model.selected.board_id, 1);
+        assert_eq!(model.selected.column_index, 0);
+        assert_eq!(model.selected.card_index, None);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+        update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+
+        update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
+        let update_result1 = update_with_run_editor_fn(
+            &mut model,
+            crate::Message::NewCard,
+            &mut terminal,
+            // replace default run_editor_fn with a stub that returns valid data
+            |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                Ok("Valid Title\n==========\n\nValid card body".to_string())
+            },
+        );
+
+        assert!(&update_result1.is_ok());
+
+        let update_result2 = update_with_run_editor_fn(
+            &mut model,
+            crate::Message::NewCard,
+            &mut terminal,
+            // replace default run_editor_fn with a stub that returns valid data
+            |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                Ok("Valid Title\n==========\n\nValid card body".to_string())
+            },
+        );
+
+        assert!(&update_result2.is_ok());
+
+        assert_eq!(
+            model.board.as_ref().unwrap().columns[0].cards,
+            vec![
+                Card {
+                    id: 2,
+                    external_id: 2,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
+                },
+                Card {
+                    id: 1,
+                    external_id: 1,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
+                },
+            ]
+        );
+
+        assert_eq!(model.selected.column_index, 0);
+        assert_eq!(model.selected.card_index, Some(0));
+
+        update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+        update(&mut model, crate::Message::NavigateDown, &mut terminal).unwrap();
+        update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
+        let update_result1 = update_with_run_editor_fn(
+            &mut model,
+            crate::Message::NewCard,
+            &mut terminal,
+            // replace default run_editor_fn with a stub that returns valid data
+            |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                Ok("Valid Title\n==========\n\nValid card body".to_string())
+            },
+        );
+
+        assert!(&update_result1.is_ok());
+
+        let update_result2 = update_with_run_editor_fn(
+            &mut model,
+            crate::Message::NewCard,
+            &mut terminal,
+            // replace default run_editor_fn with a stub that returns valid data
+            |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                Ok("Valid Title\n==========\n\nValid card body".to_string())
+            },
+        );
+
+        assert!(&update_result2.is_ok());
+
+        assert_eq!(model.selected.board_id, 2);
+
+        // ids here are 4 and 3, but external ids are 2 and 1,
+        // because we are creating ids specific to the other board,
+        // so they start from 1.
+        assert_eq!(
+            model.board.as_ref().unwrap().columns[0].cards,
+            vec![
+                Card {
+                    id: 4,
+                    external_id: 2,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
+                },
+                Card {
+                    id: 3,
+                    external_id: 1,
+                    title: "Valid Title".to_string(),
+                    body: "Valid card body".to_string(),
+                    inserted_at: "".to_string(),
+                    updated_at: "".to_string(),
+                },
+            ]
+        );
+
+        assert_eq!(model.running_state, RunningState::Running);
     }
 }
