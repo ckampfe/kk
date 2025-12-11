@@ -1589,8 +1589,6 @@ fn main() -> anyhow::Result<()> {
 
     let mut model = Model::new(options)?;
 
-    model.create_column("Todo")?;
-
     if let Some(board) = &model.board
         && let Some(first_column) = board.columns.first()
         && !first_column.cards.is_empty()
