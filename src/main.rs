@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
 use regex::Regex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use std::cmp::min;
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -201,23 +201,6 @@ impl Model {
 
     fn load_selected_board(&mut self) -> anyhow::Result<()> {
         self.board = Some(self.repo.load_board(self.selected.board_id)?);
-        Ok(())
-    }
-
-    fn create_column(&mut self, column_name: &str) -> anyhow::Result<()> {
-        if let Some(board) = &mut self.board {
-            let column = self.repo.create_column_for_board(board.id, column_name)?;
-            if !board
-                .columns
-                .iter()
-                .any(|column| column.name == column_name)
-            {
-                board.columns.push(column)
-            }
-        } else {
-            return Err(anyhow!("No board selected"));
-        }
-
         Ok(())
     }
 
@@ -675,40 +658,6 @@ impl Repo {
         tx.commit()?;
 
         Ok(board_id)
-    }
-
-    fn create_column_for_board(&self, board_id: u64, column_name: &str) -> anyhow::Result<Column> {
-        let mut latest_column_order_s = self.conn.prepare(
-            "
-        select
-            column_order
-        from statuses
-        where board_id = ?
-        order by column_order desc
-        limit 1
-        ",
-        )?;
-
-        let mut statuses_s = self.conn.prepare(
-            "
-        insert into statuses (name, column_order, board_id)
-        values (?, ?, ?)
-        on conflict do nothing;
-        ",
-        )?;
-
-        let column_order: Option<u64> = latest_column_order_s
-            .query_one([board_id], |row| row.get(0))
-            .optional()?;
-
-        let column_order = column_order.unwrap_or_default();
-
-        statuses_s.execute(params![column_name, column_order, board_id])?;
-
-        Ok(Column {
-            name: column_name.to_string(),
-            cards: vec![],
-        })
     }
 
     fn update_board_columns_order(
@@ -1620,11 +1569,71 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
+    use rusqlite::{OptionalExtension, params};
 
     use crate::{
-        Card, ConfirmationState, Mode, Model, Options, RunningState, update,
+        Card, Column, ConfirmationState, Mode, Model, Options, Repo, RunningState, update,
         update_with_run_editor_fn,
     };
+
+    impl Model {
+        fn create_column(&mut self, column_name: &str) -> anyhow::Result<()> {
+            if let Some(board) = &mut self.board {
+                let column = self.repo.create_column_for_board(board.id, column_name)?;
+                if !board
+                    .columns
+                    .iter()
+                    .any(|column| column.name == column_name)
+                {
+                    board.columns.push(column)
+                }
+            } else {
+                return Err(anyhow::anyhow!("No board selected"));
+            }
+
+            Ok(())
+        }
+    }
+
+    impl Repo {
+        fn create_column_for_board(
+            &self,
+            board_id: u64,
+            column_name: &str,
+        ) -> anyhow::Result<Column> {
+            let mut latest_column_order_s = self.conn.prepare(
+                "
+        select
+            column_order
+        from statuses
+        where board_id = ?
+        order by column_order desc
+        limit 1
+        ",
+            )?;
+
+            let mut statuses_s = self.conn.prepare(
+                "
+        insert into statuses (name, column_order, board_id)
+        values (?, ?, ?)
+        on conflict do nothing;
+        ",
+            )?;
+
+            let column_order: Option<u64> = latest_column_order_s
+                .query_one([board_id], |row| row.get(0))
+                .optional()?;
+
+            let column_order = column_order.unwrap_or_default();
+
+            statuses_s.execute(params![column_name, column_order, board_id])?;
+
+            Ok(Column {
+                name: column_name.to_string(),
+                cards: vec![],
+            })
+        }
+    }
 
     /// right now, we don't care about comparing whether cards
     /// have the same inserted_at and updated_at.
