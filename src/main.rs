@@ -971,7 +971,7 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                     let s = format!("{} {}", card.external_id, card.title);
                     ListItem::new(Text::from(textwrap::fill(
                         &s,
-                        (column_layout[1].width as usize).saturating_sub(2),
+                        (column_layout[1].width as usize).saturating_sub(3),
                     )))
                 })
                 .collect::<Vec<_>>();
