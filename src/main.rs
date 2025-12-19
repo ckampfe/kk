@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
 use regex::Regex;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::cmp::min;
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -66,19 +66,57 @@ impl Model {
 
         let board = repo.load_most_recently_viewed_board()?;
 
+        // is a board
+        // is a column
+        // is a card
+        let (mode, selected) = if let Some(board) = &board {
+            if let Some(column) = board.columns.first() {
+                if column.cards.is_empty() {
+                    (
+                        Mode::ViewingBoard,
+                        SelectedState {
+                            board_index: None,
+                            column_index: 0,
+                            card_index: None,
+                        },
+                    )
+                } else {
+                    (
+                        Mode::ViewingBoard,
+                        SelectedState {
+                            board_index: None,
+                            column_index: 0,
+                            card_index: Some(0),
+                        },
+                    )
+                }
+            } else {
+                (
+                    Mode::ViewingBoard,
+                    SelectedState {
+                        board_index: None,
+                        column_index: 0,
+                        card_index: None,
+                    },
+                )
+            }
+        } else {
+            (
+                Mode::ViewingBoards,
+                SelectedState {
+                    board_index: None,
+                    column_index: 0,
+                    card_index: None,
+                },
+            )
+        };
+
         Ok(Self {
             board_metas: vec![],
-            board: Some(board),
+            board,
             confirmation_state: ConfirmationState::No,
-            selected: SelectedState {
-                // TODO actually load the most recently used board or default board or something
-                board_id: 1,
-                // TODO actually load the most recently used board or default board or something
-                board_index: None,
-                column_index: 0,
-                card_index: None,
-            },
-            mode: Mode::ViewingBoard,
+            selected,
+            mode,
             running_state: RunningState::Running,
             repo,
             error: None,
@@ -93,9 +131,6 @@ impl Model {
         self.board = None;
         if !self.board_metas.is_empty() {
             self.selected.board_index = Some(0);
-            if let Some(board_index) = self.selected.board_index {
-                self.selected.board_id = self.board_metas[board_index].id
-            }
         }
 
         Ok(())
@@ -200,7 +235,10 @@ impl Model {
     }
 
     fn load_selected_board(&mut self) -> anyhow::Result<()> {
-        self.board = Some(self.repo.load_board(self.selected.board_id)?);
+        if let Some(board_index) = self.selected.board_index {
+            let board_id = self.board_metas[board_index].id;
+            self.board = Some(self.repo.load_board(board_id)?);
+        }
         Ok(())
     }
 
@@ -292,14 +330,7 @@ impl Repo {
 
         Self::setup_database(&mut conn)?;
 
-        let mut this = Self { conn };
-
-        // TODO rm this when there is a flow
-        // for creating a board on first run.
-        // or just have a default board?
-        this.insert_board("my great board")?;
-
-        Ok(this)
+        Ok(Self { conn })
     }
 
     fn setup_database(conn: &mut Connection) -> anyhow::Result<()> {
@@ -476,35 +507,6 @@ impl Repo {
         Ok(columns)
     }
 
-    fn insert_board(&mut self, name: &str) -> anyhow::Result<u64> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-        tx.execute(
-            "
-        insert into boards (name) values (?)
-        on conflict do nothing;
-        ",
-            [name],
-        )?;
-
-        let board_id = tx.query_row(
-            "
-        select id from boards where name = ?
-        ",
-            [name],
-            |row| {
-                let id: u64 = row.get(0)?;
-                Ok(id)
-            },
-        )?;
-
-        tx.commit()?;
-
-        Ok(board_id)
-    }
-
     fn insert_card(&mut self, board_id: u64, title: &str, body: &str) -> anyhow::Result<Card> {
         let tx = self
             .conn
@@ -609,7 +611,7 @@ impl Repo {
         self.conn.execute(
             "
         update cards
-        set 
+        set
             title = ?2,
             body = ?3
         where id = ?1
@@ -728,7 +730,7 @@ impl Repo {
         self.load_board(board_id)
     }
 
-    fn load_most_recently_viewed_board(&self) -> anyhow::Result<Board> {
+    fn load_most_recently_viewed_board(&self) -> anyhow::Result<Option<Board>> {
         let mut board_s = self.conn.prepare(
             "
         select
@@ -740,16 +742,21 @@ impl Repo {
         ",
         )?;
 
-        let (board_id, board_name): (u64, String) =
-            board_s.query_one([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let board_meta: Option<(u64, String)> = board_s
+            .query_one([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
 
-        let columns = self.get_cards_for_board(board_id)?;
+        if let Some((board_id, board_name)) = board_meta {
+            let columns = self.get_cards_for_board(board_id)?;
 
-        Ok(Board {
-            id: board_id,
-            name: board_name,
-            columns,
-        })
+            Ok(Some(Board {
+                id: board_id,
+                name: board_name,
+                columns,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     fn delete_card(&self, card_id: u64) -> anyhow::Result<()> {
@@ -774,7 +781,6 @@ struct Board {
 
 #[derive(Debug, Default, PartialEq)]
 struct SelectedState {
-    board_id: u64,
     board_index: Option<usize>,
     column_index: usize,
     card_index: Option<usize>,
@@ -1287,7 +1293,11 @@ where
         Mode::ViewingBoard => {
             match msg {
                 Message::ViewBoardsMode => model.switch_to_viewing_boards_mode()?,
-                Message::MoveCardMode => model.mode = Mode::MovingCard,
+                Message::MoveCardMode => {
+                    if model.selected.card_index.is_some() {
+                        model.mode = Mode::MovingCard
+                    }
+                }
                 Message::ViewCardDetailMode => {
                     if let Some(column) = model.selected_column()
                         && !column.cards.is_empty()
@@ -1318,9 +1328,13 @@ where
                         run_editor_fn(terminal, "Title\n==========\n\nContent goes here")?;
                     let (title, body) = parse_raw_card_text(&raw_card_text)?;
 
-                    let card = model
-                        .repo
-                        .insert_card(model.selected.board_id, title, body)?;
+                    let board_id = if let Some(board) = &model.board {
+                        board.id
+                    } else {
+                        panic!()
+                    };
+
+                    let card = model.repo.insert_card(board_id, title, body)?;
 
                     model.mode = Mode::ViewingBoard;
                     model.selected.column_index = 0;
@@ -1396,20 +1410,12 @@ where
             Message::NavigateUp => {
                 model.selected.board_index =
                     model.selected.board_index.map(|i| i.saturating_sub(1));
-
-                if let Some(board_index) = model.selected.board_index {
-                    model.selected.board_id = model.board_metas[board_index].id;
-                }
             }
             Message::NavigateDown => {
                 model.selected.board_index = model
                     .selected
                     .board_index
                     .map(|i| min(model.board_metas.len().saturating_sub(1), i + 1));
-
-                if let Some(board_index) = model.selected.board_index {
-                    model.selected.board_id = model.board_metas[board_index].id;
-                }
             }
             Message::NewBoard => {
                 let raw_board_text = run_editor_fn(
@@ -1422,6 +1428,7 @@ where
                 // 1. create board, get board_id
                 model.create_board(name, &column_names)?;
                 // 2. insert columns, get columns ids
+                model.selected.board_index = Some(0);
             }
             Message::EditBoard => {
                 let selected_board = &model.board_metas[model.selected.board_index.unwrap()];
@@ -1442,6 +1449,7 @@ where
                 model.mode = Mode::ViewingBoard;
                 model.load_selected_board()?;
                 model.board_metas = vec![];
+                model.selected.board_index = None;
             }
             Message::Quit => model.running_state = RunningState::Done,
             m => panic!("unhandled message: {:?}", m),
@@ -1599,71 +1607,11 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
-    use rusqlite::{OptionalExtension, params};
 
     use crate::{
-        Card, Column, ConfirmationState, Mode, Model, Options, Repo, RunningState, update,
+        Card, ConfirmationState, Mode, Model, Options, RunningState, update,
         update_with_run_editor_fn,
     };
-
-    impl Model {
-        fn create_column(&mut self, column_name: &str) -> anyhow::Result<()> {
-            if let Some(board) = &mut self.board {
-                let column = self.repo.create_column_for_board(board.id, column_name)?;
-                if !board
-                    .columns
-                    .iter()
-                    .any(|column| column.name == column_name)
-                {
-                    board.columns.push(column)
-                }
-            } else {
-                return Err(anyhow::anyhow!("No board selected"));
-            }
-
-            Ok(())
-        }
-    }
-
-    impl Repo {
-        fn create_column_for_board(
-            &self,
-            board_id: u64,
-            column_name: &str,
-        ) -> anyhow::Result<Column> {
-            let mut latest_column_order_s = self.conn.prepare(
-                "
-        select
-            column_order
-        from statuses
-        where board_id = ?
-        order by column_order desc
-        limit 1
-        ",
-            )?;
-
-            let mut statuses_s = self.conn.prepare(
-                "
-        insert into statuses (name, column_order, board_id)
-        values (?, ?, ?)
-        on conflict do nothing;
-        ",
-            )?;
-
-            let column_order: Option<u64> = latest_column_order_s
-                .query_one([board_id], |row| row.get(0))
-                .optional()?;
-
-            let column_order = column_order.unwrap_or_default();
-
-            statuses_s.execute(params![column_name, column_order, board_id])?;
-
-            Ok(Column {
-                name: column_name.to_string(),
-                cards: vec![],
-            })
-        }
-    }
 
     /// right now, we don't care about comparing whether cards
     /// have the same inserted_at and updated_at.
@@ -1678,7 +1626,7 @@ mod tests {
     mod create_board {
         use ratatui::Terminal;
 
-        use crate::{Model, Options, RunningState, update, update_with_run_editor_fn};
+        use crate::{Model, Options, RunningState, update_with_run_editor_fn};
 
         #[test]
         fn with_zero_columns() {
@@ -1687,12 +1635,8 @@ mod tests {
             })
             .unwrap();
 
-            model.create_board("Board1", &["Todo"]).unwrap();
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
-
-            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
 
             let update_result = update_with_run_editor_fn(
                 &mut model,
@@ -1716,12 +1660,8 @@ mod tests {
             })
             .unwrap();
 
-            model.create_board("Board1", &["Todo"]).unwrap();
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
-
-            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
 
             let update_result = update_with_run_editor_fn(
                 &mut model,
@@ -1740,7 +1680,9 @@ mod tests {
     }
 
     mod new_card {
-        use crate::{Card, Model, Options, RunningState, update_with_run_editor_fn};
+        use crate::{
+            Card, Message, Model, Options, RunningState, update, update_with_run_editor_fn,
+        };
         use ratatui::Terminal;
 
         #[test]
@@ -1750,10 +1692,18 @@ mod tests {
             })
             .unwrap();
 
-            model.create_column("Todo").unwrap();
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
 
             let update_result = update_with_run_editor_fn(
                 &mut model,
@@ -1777,13 +1727,18 @@ mod tests {
             })
             .unwrap();
 
-            model.create_column("Todo").unwrap();
-
-            assert_eq!(model.selected.column_index, 0);
-            assert_eq!(model.selected.card_index, None);
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
 
             let update_result = update_with_run_editor_fn(
                 &mut model,
@@ -1829,7 +1784,9 @@ mod tests {
     }
 
     mod edit_card {
-        use crate::{Card, Model, Options, RunningState, update_with_run_editor_fn};
+        use crate::{
+            Card, Message, Model, Options, RunningState, update, update_with_run_editor_fn,
+        };
         use ratatui::Terminal;
 
         #[test]
@@ -1839,10 +1796,18 @@ mod tests {
             })
             .unwrap();
 
-            model.create_column("Todo").unwrap();
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
 
             let update_result = update_with_run_editor_fn(
                 &mut model,
@@ -1911,10 +1876,18 @@ mod tests {
             })
             .unwrap();
 
-            model.create_column("Todo").unwrap();
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
 
             let update_result = update_with_run_editor_fn(
                 &mut model,
@@ -1993,7 +1966,10 @@ mod tests {
     }
 
     mod navigate_left {
-        use crate::{Board, Card, Column, Model, Options, RunningState, SelectedState, update};
+        use crate::{
+            Board, Card, Column, Message, Model, Options, RunningState, SelectedState, update,
+            update_with_run_editor_fn,
+        };
 
         #[test]
         fn when_left() {
@@ -2005,13 +1981,22 @@ mod tests {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
-            update(&mut model, crate::Message::NavigateLeft, &mut terminal).unwrap();
+            update_with_run_editor_fn(
+                &mut model,
+                Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
+
+            update(&mut model, Message::NavigateLeft, &mut terminal).unwrap();
 
             assert_eq!(model.running_state, RunningState::Running);
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
                     column_index: 0,
                     card_index: None
@@ -2061,13 +2046,14 @@ mod tests {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
             update(&mut model, crate::Message::NavigateLeft, &mut terminal).unwrap();
 
             assert_eq!(model.running_state, RunningState::Running);
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
                     column_index: 0,
                     card_index: Some(0)
@@ -2110,13 +2096,14 @@ mod tests {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
             update(&mut model, crate::Message::NavigateLeft, &mut terminal).unwrap();
 
             assert_eq!(model.running_state, RunningState::Running);
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
                     column_index: 0,
                     card_index: None
@@ -2135,8 +2122,25 @@ mod tests {
             })
             .unwrap();
 
+            model.board = Some(Board {
+                id: 1,
+                name: "Board".to_string(),
+                columns: vec![
+                    Column {
+                        name: "Todo".to_string(),
+                        cards: vec![],
+                    },
+                    Column {
+                        name: "Doing".to_string(),
+                        cards: vec![],
+                    },
+                ],
+            });
+
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
 
             update(&mut model, crate::Message::NavigateRight, &mut terminal).unwrap();
 
@@ -2144,9 +2148,8 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
-                    column_index: 0,
+                    column_index: 1,
                     card_index: None
                 }
             );
@@ -2194,13 +2197,14 @@ mod tests {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
             update(&mut model, crate::Message::NavigateRight, &mut terminal).unwrap();
 
             assert_eq!(model.running_state, RunningState::Running);
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
                     column_index: 1,
                     card_index: Some(0)
@@ -2243,13 +2247,14 @@ mod tests {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
             update(&mut model, crate::Message::NavigateRight, &mut terminal).unwrap();
 
             assert_eq!(model.running_state, RunningState::Running);
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
                     column_index: 1,
                     card_index: Some(0)
@@ -2259,7 +2264,10 @@ mod tests {
     }
 
     mod navigate_down {
-        use crate::{Board, Card, Column, Model, Options, RunningState, SelectedState, update};
+        use crate::{
+            Board, Card, Column, Model, Options, RunningState, SelectedState, update,
+            update_with_run_editor_fn,
+        };
 
         #[test]
         fn when_length_is_one() {
@@ -2296,7 +2304,6 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
                     column_index: 0,
                     card_index: Some(0)
@@ -2311,37 +2318,34 @@ mod tests {
             })
             .unwrap();
 
-            model.board = Some(Board {
-                id: 1,
-                name: "Board".to_string(),
-                columns: vec![Column {
-                    name: "Todo".to_string(),
-                    cards: vec![
-                        Card {
-                            id: 1,
-                            external_id: 1,
-                            title: "title 1".to_string(),
-                            body: "body 1".to_string(),
-                            inserted_at: "".to_string(),
-                            updated_at: "".to_string(),
-                        },
-                        Card {
-                            id: 2,
-                            external_id: 2,
-                            title: "title 2".to_string(),
-                            body: "body 2".to_string(),
-                            inserted_at: "".to_string(),
-                            updated_at: "".to_string(),
-                        },
-                    ],
-                }],
-            });
-
-            model.selected.column_index = 0;
-            model.selected.card_index = Some(0);
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                |_terminal, _template| Ok("card1\n=====\n\n- body1\n".to_string()),
+            )
+            .unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                |_terminal, _template| Ok("card2\n=====\n\n- body2\n".to_string()),
+            )
+            .unwrap();
 
             update(&mut model, crate::Message::NavigateDown, &mut terminal).unwrap();
 
@@ -2349,7 +2353,6 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
                     column_index: 0,
                     card_index: Some(1)
@@ -2359,7 +2362,10 @@ mod tests {
     }
 
     mod navigate_up {
-        use crate::{Board, Card, Column, Model, Options, RunningState, SelectedState, update};
+        use crate::{
+            Board, Card, Column, Model, Options, RunningState, SelectedState, update,
+            update_with_run_editor_fn,
+        };
 
         #[test]
         fn when_length_is_one() {
@@ -2396,7 +2402,6 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
                     column_index: 0,
                     card_index: Some(0)
@@ -2411,37 +2416,34 @@ mod tests {
             })
             .unwrap();
 
-            model.board = Some(Board {
-                id: 1,
-                name: "Board".to_string(),
-                columns: vec![Column {
-                    name: "Todo".to_string(),
-                    cards: vec![
-                        Card {
-                            id: 1,
-                            external_id: 1,
-                            title: "title 1".to_string(),
-                            body: "body 1".to_string(),
-                            inserted_at: "".to_string(),
-                            updated_at: "".to_string(),
-                        },
-                        Card {
-                            id: 2,
-                            external_id: 2,
-                            title: "title 2".to_string(),
-                            body: "body 2".to_string(),
-                            inserted_at: "".to_string(),
-                            updated_at: "".to_string(),
-                        },
-                    ],
-                }],
-            });
-
-            model.selected.column_index = 0;
-            model.selected.card_index = Some(1);
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                |_terminal, _template| Ok("card1\n=====\n\n- body1\n".to_string()),
+            )
+            .unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                |_terminal, _template| Ok("card2\n=====\n\n- body2\n".to_string()),
+            )
+            .unwrap();
 
             update(&mut model, crate::Message::NavigateUp, &mut terminal).unwrap();
 
@@ -2449,7 +2451,6 @@ mod tests {
             assert_eq!(
                 model.selected,
                 SelectedState {
-                    board_id: 1,
                     board_index: None,
                     column_index: 0,
                     card_index: Some(0)
@@ -2459,10 +2460,12 @@ mod tests {
     }
 
     mod switch_to_moving_mode {
-        use crate::{Mode, Model, Options, RunningState, update};
+        use crate::{
+            Message, Mode, Model, Options, RunningState, update, update_with_run_editor_fn,
+        };
 
         #[test]
-        fn switches() {
+        fn switches_with_card() {
             let mut model = Model::new(Options {
                 database_path: Some(":memory:".into()),
             })
@@ -2470,6 +2473,24 @@ mod tests {
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                |_terminal, _template| Ok("card1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
 
             assert_eq!(model.mode, Mode::ViewingBoard);
 
@@ -2478,10 +2499,40 @@ mod tests {
             assert_eq!(model.running_state, RunningState::Running);
             assert_eq!(model.mode, Mode::MovingCard);
         }
+
+        #[test]
+        fn does_not_switch_without_card() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
+
+            assert_eq!(model.mode, Mode::ViewingBoard);
+
+            update(&mut model, crate::Message::MoveCardMode, &mut terminal).unwrap();
+
+            assert_eq!(model.running_state, RunningState::Running);
+            assert_eq!(model.mode, Mode::ViewingBoard);
+        }
     }
 
     mod switch_to_view_card_detail_mode {
-        use crate::{Card, Mode, Model, Options, RunningState, update};
+        use crate::{
+            Message, Mode, Model, Options, RunningState, update, update_with_run_editor_fn,
+        };
 
         #[test]
         fn switches_when_column_is_not_empty() {
@@ -2490,19 +2541,26 @@ mod tests {
             })
             .unwrap();
 
-            model.create_column("Todo").unwrap();
-
-            model.add_card_to_selected_column(Card {
-                id: 1,
-                external_id: 1,
-                title: "Title".to_string(),
-                body: "Body".to_string(),
-                inserted_at: "".to_string(),
-                updated_at: "".to_string(),
-            });
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                |_terminal, _template| Ok("card1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
 
             assert_eq!(model.mode, Mode::ViewingBoard);
 
@@ -2526,6 +2584,16 @@ mod tests {
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
 
             assert_eq!(model.mode, Mode::ViewingBoard);
 
@@ -2571,7 +2639,7 @@ mod tests {
     }
 
     mod boards_view {
-        use crate::{Mode, Model, Options, update};
+        use crate::{Mode, Model, Options, update, update_with_run_editor_fn};
 
         #[test]
         fn navigate_down_with_one_board() {
@@ -2584,6 +2652,10 @@ mod tests {
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            assert_eq!(model.mode, Mode::ViewingBoards);
+
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
 
             update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
 
@@ -2605,15 +2677,28 @@ mod tests {
             })
             .unwrap();
 
-            model.create_board("Board1", &["Todo"]).unwrap();
-            model.create_board("Board2", &["Todo"]).unwrap();
+            assert_eq!(model.mode, Mode::ViewingBoards);
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
-            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
 
-            assert_eq!(model.mode, Mode::ViewingBoards);
+            assert_eq!(model.selected.board_index, Some(0));
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board2\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
 
             assert_eq!(model.selected.board_index, Some(0));
 
@@ -2631,10 +2716,14 @@ mod tests {
             })
             .unwrap();
 
+            assert_eq!(model.mode, Mode::ViewingBoards);
+
             model.create_board("Board1", &["Todo"]).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
 
             update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
 
@@ -2656,13 +2745,30 @@ mod tests {
             })
             .unwrap();
 
-            model.create_board("Board1", &["Todo"]).unwrap();
-            model.create_board("Board2", &["Todo"]).unwrap();
+            assert_eq!(model.mode, Mode::ViewingBoards);
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
-            update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+            assert_eq!(model.selected.board_index, None);
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            assert_eq!(model.selected.board_index, Some(0));
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board2\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
 
             assert_eq!(model.mode, Mode::ViewingBoards);
 
@@ -2684,11 +2790,18 @@ mod tests {
         })
         .unwrap();
 
-        model.create_column("Todo").unwrap();
-        // model.create_board("Board1", &["Todo"]).unwrap();
-
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+        update_with_run_editor_fn(
+            &mut model,
+            crate::Message::NewBoard,
+            &mut terminal,
+            |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+        )
+        .unwrap();
+
+        update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
 
         let update_result = update_with_run_editor_fn(
             &mut model,
@@ -2741,17 +2854,29 @@ mod tests {
         })
         .unwrap();
 
-        model.create_board("Board2", &["Todo"]).unwrap();
-        model.create_board("Board1", &["Todo"]).unwrap();
-
-        assert_eq!(model.selected.board_id, 1);
         assert_eq!(model.selected.column_index, 0);
         assert_eq!(model.selected.card_index, None);
 
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
 
-        update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
+        update_with_run_editor_fn(
+            &mut model,
+            crate::Message::NewBoard,
+            &mut terminal,
+            |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(model.selected.board_index, Some(0));
+
+        update_with_run_editor_fn(
+            &mut model,
+            crate::Message::NewBoard,
+            &mut terminal,
+            |_terminal, _template| Ok("Board2\n=====\n\n- Todo\n".to_string()),
+        )
+        .unwrap();
 
         update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
 
@@ -2831,8 +2956,6 @@ mod tests {
         );
 
         assert!(&update_result2.is_ok());
-
-        assert_eq!(model.selected.board_id, 2);
 
         // ids here are 4 and 3, but external ids are 2 and 1,
         // because we are creating ids specific to the other board,
