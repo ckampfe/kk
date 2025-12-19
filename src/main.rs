@@ -1626,7 +1626,7 @@ mod tests {
     mod create_board {
         use ratatui::Terminal;
 
-        use crate::{Model, Options, RunningState, update_with_run_editor_fn};
+        use crate::{Message, Model, Options, RunningState, update, update_with_run_editor_fn};
 
         #[test]
         fn with_zero_columns() {
@@ -1676,6 +1676,63 @@ mod tests {
             assert!(update_result.is_ok());
 
             assert_eq!(model.running_state, RunningState::Running);
+        }
+
+        #[test]
+        fn new_card_goes_to_correct_board_when_multiple_boards() {
+            let mut model = Model::new(Options {
+                database_path: Some(":memory:".into()),
+            })
+            .unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns invalid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Board1\n==========\n\n- Todo".to_string())
+                },
+            )
+            .unwrap();
+
+            assert_eq!(model.selected.board_index, Some(0));
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns invalid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Board2\n==========\n\n- Todo".to_string())
+                },
+            )
+            .unwrap();
+
+            assert_eq!(model.selected.board_index, Some(0));
+
+            update(&mut model, Message::ViewBoardMode, &mut terminal).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewCard,
+                &mut terminal,
+                // replace default run_editor_fn with a stub that returns invalid data
+                |_terminal: &mut Terminal<ratatui::backend::TestBackend>, _template: &str| {
+                    Ok("Card1\n==========\n\n- Todo".to_string())
+                },
+            )
+            .unwrap();
+
+            assert!(model.board.is_some());
+
+            let board = model.board.unwrap();
+
+            assert_eq!(board.columns[0].cards[0].id, 1);
+            assert_eq!(board.columns[0].cards[0].title, "Card1");
         }
     }
 
