@@ -904,10 +904,10 @@ fn view(model: &mut Model, frame: &mut ratatui::Frame) {
 }
 
 fn view_boards(model: &mut Model, frame: &mut ratatui::Frame<'_>) {
-    let layout = Layout::default()
+    let [title_layout, boards_layout, modeline_layout] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Max(99)])
-        .split(frame.area());
+        .constraints([Constraint::Max(1), Constraint::Min(1), Constraint::Max(3)])
+        .areas(frame.area());
 
     let mut state = ListState::default().with_selected(model.selected.board_index);
 
@@ -937,8 +937,50 @@ fn view_boards(model: &mut Model, frame: &mut ratatui::Frame<'_>) {
                 ),
         );
 
-    frame.render_widget(Paragraph::new("Boards"), layout[0]);
-    frame.render_stateful_widget(list, layout[1], &mut state);
+    frame.render_widget(Paragraph::new("Boards"), title_layout);
+    frame.render_stateful_widget(list, boards_layout, &mut state);
+
+    let modeline_block = Block::new()
+        .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+        .title(
+            Line::from(match model.mode {
+                Mode::ViewingBoards => "VIEWING BOARDS",
+                _ => unreachable!(),
+            })
+            .left_aligned(),
+        );
+
+    let modeline_text = {
+        let mut modeline_text = String::new();
+
+        if let Some(e) = &model.error {
+            modeline_text.push_str(" - Error: ");
+            modeline_text.push_str(&e.replace("\n", " "));
+        } else {
+            let formatted = match model.mode {
+                Mode::ViewingBoards => [
+                    ("[j/down]", "down"),
+                    ("[k/up]", "up"),
+                    ("[enter]", "view board"),
+                    ("[n]", "new board"),
+                    ("[e]", "edit board"),
+                    ("[q]", "quit"),
+                ]
+                .iter()
+                .map(|(k, action)| format!("{} - {}", k, action))
+                .collect::<Vec<_>>(),
+                _ => unreachable!(),
+            };
+
+            modeline_text.push_str(&formatted.join(" │ "));
+        }
+
+        modeline_text
+    };
+
+    let modeline = Paragraph::new(modeline_text).block(modeline_block);
+
+    frame.render_widget(modeline, modeline_layout);
 }
 
 fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
