@@ -190,6 +190,7 @@ impl Model {
         if let Some(board) = &mut self.board {
             let left_column_id = self.selected.column_index.saturating_sub(1);
             if left_column_id != self.selected.column_index
+                && let Some(current_column) = board.columns.get(self.selected.column_index)
                 && let Some(left_column) = board.columns.get(left_column_id)
             {
                 let left_column_len = left_column.cards.len();
@@ -198,6 +199,8 @@ impl Model {
 
                 self.selected.card_index = if left_column.cards.is_empty() {
                     None
+                } else if current_column.cards.is_empty() {
+                    Some(0)
                 } else {
                     Some(min(
                         left_column_len.saturating_sub(1),
@@ -214,6 +217,7 @@ impl Model {
         if let Some(board) = &mut self.board {
             let right_column_id = self.selected.column_index.saturating_add(1);
             if right_column_id != self.selected.column_index
+                && let Some(current_column) = board.columns.get(self.selected.column_index)
                 && let Some(right_column) = board.columns.get(right_column_id)
             {
                 let right_column_len = right_column.cards.len();
@@ -222,6 +226,8 @@ impl Model {
 
                 self.selected.card_index = if right_column.cards.is_empty() {
                     None
+                } else if current_column.cards.is_empty() {
+                    Some(0)
                 } else {
                     Some(min(
                         right_column_len.saturating_sub(1),
