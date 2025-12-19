@@ -355,7 +355,7 @@ impl Repo {
                 inserted_at timestamp not null default current_timestamp,
                 updated_at timestamp not null default current_timestamp,
 
-                foreign key(board_id) references boards(id)
+                foreign key(board_id) references boards(id) on delete cascade
             );
 
             create unique index if not exists statuses_name_board_id on statuses (name, board_id);
@@ -376,8 +376,8 @@ impl Repo {
                 inserted_at timestamp not null default current_timestamp,
                 updated_at timestamp not null default current_timestamp,
 
-                foreign key(board_id) references boards(id)
-                foreign key(status_id) references statuses(id)
+                foreign key(board_id) references boards(id) on delete cascade,
+                foreign key(status_id) references statuses(id) on delete cascade
             );
 
             create index if not exists cards_board_id on cards (board_id);
