@@ -1384,6 +1384,7 @@ where
         }
         Mode::ViewingCardDetail => match msg {
             Message::ViewBoardMode => model.mode = Mode::ViewingBoard,
+            Message::Quit => model.running_state = RunningState::Done,
             m => panic!("unhandled message: {:?}", m),
         },
         Mode::MovingCard => match msg {
