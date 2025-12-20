@@ -76,7 +76,7 @@ impl Model {
                         Mode::ViewingBoard,
                         SelectedState {
                             board_index: None,
-                            column_index: 0,
+                            column_index: None,
                             card_index: None,
                         },
                     )
@@ -85,7 +85,7 @@ impl Model {
                         Mode::ViewingBoard,
                         SelectedState {
                             board_index: None,
-                            column_index: 0,
+                            column_index: Some(0),
                             card_index: Some(0),
                         },
                     )
@@ -95,7 +95,7 @@ impl Model {
                     Mode::ViewingBoard,
                     SelectedState {
                         board_index: None,
-                        column_index: 0,
+                        column_index: Some(0),
                         card_index: None,
                     },
                 )
@@ -105,7 +105,7 @@ impl Model {
                 Mode::ViewingBoards,
                 SelectedState {
                     board_index: None,
-                    column_index: 0,
+                    column_index: None,
                     card_index: None,
                 },
             )
@@ -128,7 +128,11 @@ impl Model {
     fn switch_to_viewing_boards_mode(&mut self) -> anyhow::Result<()> {
         self.mode = Mode::ViewingBoards;
         self.board_metas = self.repo.get_board_metas()?;
+
         self.board = None;
+        self.selected.card_index = None;
+        self.selected.column_index = None;
+
         if !self.board_metas.is_empty() {
             self.selected.board_index = Some(0);
         }
@@ -138,7 +142,12 @@ impl Model {
 
     fn selected_column_mut(&mut self) -> Option<&mut Column> {
         let board = self.board.as_mut().unwrap();
-        board.columns.get_mut(self.selected.column_index)
+
+        if let Some(column_index) = self.selected.column_index {
+            board.columns.get_mut(column_index)
+        } else {
+            None
+        }
     }
 
     fn add_card_to_selected_column(&mut self, card: Card) {
@@ -183,19 +192,25 @@ impl Model {
 
     fn selected_column(&self) -> Option<&Column> {
         let board = self.board.as_ref().unwrap();
-        board.columns.get(self.selected.column_index)
+        if let Some(column_index) = self.selected.column_index {
+            board.columns.get(column_index)
+        } else {
+            None
+        }
     }
 
     fn navigate_left(&mut self) {
-        if let Some(board) = &mut self.board {
-            let left_column_id = self.selected.column_index.saturating_sub(1);
-            if left_column_id != self.selected.column_index
-                && let Some(current_column) = board.columns.get(self.selected.column_index)
+        if let Some(board) = &mut self.board
+            && let Some(selected_column_index) = self.selected.column_index
+        {
+            let left_column_id = selected_column_index.saturating_sub(1);
+            if left_column_id != selected_column_index
+                && let Some(current_column) = board.columns.get(selected_column_index)
                 && let Some(left_column) = board.columns.get(left_column_id)
             {
                 let left_column_len = left_column.cards.len();
 
-                self.selected.column_index = left_column_id;
+                self.selected.column_index = Some(left_column_id);
 
                 self.selected.card_index = if left_column.cards.is_empty() {
                     None
@@ -214,15 +229,18 @@ impl Model {
     }
 
     fn navigate_right(&mut self) {
-        if let Some(board) = &mut self.board {
-            let right_column_id = self.selected.column_index.saturating_add(1);
-            if right_column_id != self.selected.column_index
-                && let Some(current_column) = board.columns.get(self.selected.column_index)
+        if let Some(board) = &mut self.board
+            && let Some(selected_column_index) = self.selected.column_index
+        {
+            let right_column_id = selected_column_index.saturating_add(1);
+
+            if right_column_id != selected_column_index
+                && let Some(current_column) = board.columns.get(selected_column_index)
                 && let Some(right_column) = board.columns.get(right_column_id)
             {
                 let right_column_len = right_column.cards.len();
 
-                self.selected.column_index = right_column_id;
+                self.selected.column_index = Some(right_column_id);
 
                 self.selected.card_index = if right_column.cards.is_empty() {
                     None
@@ -243,7 +261,18 @@ impl Model {
     fn load_selected_board(&mut self) -> anyhow::Result<()> {
         if let Some(board_index) = self.selected.board_index {
             let board_id = self.board_metas[board_index].id;
-            self.board = Some(self.repo.load_board(board_id)?);
+            let board = self.repo.load_board(board_id)?;
+
+            self.selected.board_index = None;
+            self.selected.column_index = Some(0);
+            self.selected.card_index = if !board.columns[0].cards.is_empty() {
+                Some(0)
+            } else {
+                None
+            };
+            self.board_metas = vec![];
+
+            self.board = Some(board);
         }
         Ok(())
     }
@@ -293,7 +322,8 @@ impl Model {
     fn delete_selected_card(&mut self) -> anyhow::Result<()> {
         if let Some(card_id) = self.selected_card_id()
             && let Some(board) = &mut self.board
-            && let Some(column) = board.columns.get_mut(self.selected.column_index)
+            && let Some(column_index) = self.selected.column_index
+            && let Some(column) = board.columns.get_mut(column_index)
             && let Some(card_index) = self.selected.card_index.as_mut()
         {
             self.repo.delete_card(card_id)?;
@@ -788,7 +818,7 @@ struct Board {
 #[derive(Debug, Default, PartialEq)]
 struct SelectedState {
     board_index: Option<usize>,
-    column_index: usize,
+    column_index: Option<usize>,
     card_index: Option<usize>,
 }
 
@@ -1006,7 +1036,7 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
 
             frame.render_widget(Paragraph::new(&*column.name), column_layout[0]);
 
-            let mut state = if model.selected.column_index == i {
+            let mut state = if i == model.selected.column_index.unwrap() {
                 ListState::default().with_selected(model.selected.card_index)
             } else {
                 ListState::default().with_selected(None)
@@ -1385,7 +1415,7 @@ where
                     let card = model.repo.insert_card(board_id, title, body)?;
 
                     model.mode = Mode::ViewingBoard;
-                    model.selected.column_index = 0;
+                    model.selected.column_index = Some(0);
                     model.selected.card_index = Some(0);
 
                     model.add_card_to_selected_column(card);
@@ -1478,6 +1508,7 @@ where
                 model.create_board(name, &column_names)?;
                 // 2. insert columns, get columns ids
                 model.selected.board_index = Some(0);
+                model.selected.column_index = Some(0);
             }
             Message::EditBoard => {
                 let selected_board = &model.board_metas[model.selected.board_index.unwrap()];
@@ -1497,8 +1528,6 @@ where
             Message::ViewBoardMode => {
                 model.mode = Mode::ViewingBoard;
                 model.load_selected_board()?;
-                model.board_metas = vec![];
-                model.selected.board_index = None;
             }
             Message::Quit => model.running_state = RunningState::Done,
             m => panic!("unhandled message: {:?}", m),
@@ -1511,13 +1540,14 @@ where
 // TODO move this onto Model impl
 fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
     if let Some(board) = &mut model.board
+        && let Some(selected_column_index) = model.selected.column_index
         && let Some(selected_card_index) = model.selected.card_index
     {
-        let current_column_id = model.selected.column_index;
-        let left_column_id = model.selected.column_index.saturating_sub(1);
+        // let current_column_id = selected_column_index;
+        let left_column_id = selected_column_index.saturating_sub(1);
 
-        if left_column_id != current_column_id {
-            let card = board.columns[current_column_id]
+        if left_column_id != selected_column_index {
+            let card = board.columns[selected_column_index]
                 .cards
                 .remove(selected_card_index);
 
@@ -1529,7 +1559,7 @@ fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
 
             model.selected.card_index = Some(0);
 
-            model.selected.column_index = left_column_id;
+            model.selected.column_index = Some(left_column_id);
         }
     }
 
@@ -1539,28 +1569,32 @@ fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
 // TODO move this onto Model impl
 fn move_selected_card_right(model: &mut Model) -> anyhow::Result<()> {
     if let Some(board) = &mut model.board
+        && let Some(selected_column_index) = model.selected.column_index
         && let Some(selected_card_index) = model.selected.card_index
     {
-        let current_column_id = model.selected.column_index;
-        let right_column_id = min(
-            model.selected.column_index + 1,
+        // let current_column_id = model.selected.column_index;
+
+        let right_column_index = min(
+            selected_column_index + 1,
             board.columns.len().saturating_sub(1),
         );
 
-        if right_column_id != current_column_id {
-            let card = board.columns[current_column_id]
+        if right_column_index != selected_column_index {
+            let card = board.columns[selected_column_index]
                 .cards
                 .remove(selected_card_index);
 
-            model
-                .repo
-                .set_card_status(board.id, card.id, &board.columns[right_column_id].name)?;
+            model.repo.set_card_status(
+                board.id,
+                card.id,
+                &board.columns[right_column_index].name,
+            )?;
 
-            board.columns[right_column_id].cards.insert(0, card);
+            board.columns[right_column_index].cards.insert(0, card);
 
             model.selected.card_index = Some(0);
 
-            model.selected.column_index = right_column_id;
+            model.selected.column_index = Some(right_column_index);
         }
     }
 
@@ -1870,7 +1904,7 @@ mod tests {
                 }]
             );
 
-            assert_eq!(model.selected.column_index, 0);
+            assert_eq!(model.selected.column_index, Some(0));
             assert_eq!(model.selected.card_index, Some(0));
 
             assert_eq!(
@@ -1927,10 +1961,10 @@ mod tests {
 
             assert!(update_result.is_ok());
 
-            model.selected.column_index = 0;
+            model.selected.column_index = Some(0);
             model.selected.card_index = Some(0);
 
-            assert_eq!(model.selected.column_index, 0);
+            assert_eq!(model.selected.column_index, Some(0));
             assert_eq!(model.selected.card_index, Some(0));
 
             let update_result = update_with_run_editor_fn(
@@ -1957,7 +1991,7 @@ mod tests {
                 }]
             );
 
-            assert_eq!(model.selected.column_index, 0);
+            assert_eq!(model.selected.column_index, Some(0));
             assert_eq!(model.selected.card_index, Some(0));
 
             assert_eq!(
@@ -2007,10 +2041,10 @@ mod tests {
 
             assert!(update_result.is_ok());
 
-            model.selected.column_index = 0;
+            model.selected.column_index = Some(0);
             model.selected.card_index = Some(0);
 
-            assert_eq!(model.selected.column_index, 0);
+            assert_eq!(model.selected.column_index, Some(0));
             assert_eq!(model.selected.card_index, Some(0));
 
             let update_result = update_with_run_editor_fn(
@@ -2037,7 +2071,7 @@ mod tests {
                 }]
             );
 
-            assert_eq!(model.selected.column_index, 0);
+            assert_eq!(model.selected.column_index, Some(0));
             assert_eq!(model.selected.card_index, Some(0));
 
             assert_eq!(
@@ -2104,7 +2138,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 0,
+                    column_index: Some(0),
                     card_index: None
                 }
             );
@@ -2146,7 +2180,7 @@ mod tests {
                 ],
             });
 
-            model.selected.column_index = 1;
+            model.selected.column_index = Some(1);
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -2161,7 +2195,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 0,
+                    column_index: Some(0),
                     card_index: Some(0)
                 }
             );
@@ -2196,7 +2230,7 @@ mod tests {
                 ],
             });
 
-            model.selected.column_index = 1;
+            model.selected.column_index = Some(1);
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -2211,7 +2245,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 0,
+                    column_index: Some(0),
                     card_index: None
                 }
             );
@@ -2219,7 +2253,10 @@ mod tests {
     }
 
     mod navigate_right {
-        use crate::{Board, Card, Column, Model, Options, RunningState, SelectedState, update};
+        use crate::{
+            Board, Card, Column, Model, Options, RunningState, SelectedState, update,
+            update_with_run_editor_fn,
+        };
 
         #[test]
         fn when_right() {
@@ -2228,23 +2265,16 @@ mod tests {
             })
             .unwrap();
 
-            model.board = Some(Board {
-                id: 1,
-                name: "Board".to_string(),
-                columns: vec![
-                    Column {
-                        name: "Todo".to_string(),
-                        cards: vec![],
-                    },
-                    Column {
-                        name: "Doing".to_string(),
-                        cards: vec![],
-                    },
-                ],
-            });
-
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n- Doing\n".to_string()),
+            )
+            .unwrap();
 
             update(&mut model, crate::Message::ViewBoardMode, &mut terminal).unwrap();
 
@@ -2255,7 +2285,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 1,
+                    column_index: Some(1),
                     card_index: None
                 }
             );
@@ -2297,7 +2327,7 @@ mod tests {
                 ],
             });
 
-            model.selected.column_index = 0;
+            model.selected.column_index = Some(0);
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -2312,7 +2342,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 1,
+                    column_index: Some(1),
                     card_index: Some(0)
                 }
             );
@@ -2347,7 +2377,7 @@ mod tests {
                 ],
             });
 
-            model.selected.column_index = 1;
+            model.selected.column_index = Some(1);
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -2362,7 +2392,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 1,
+                    column_index: Some(1),
                     card_index: Some(0)
                 }
             );
@@ -2398,7 +2428,7 @@ mod tests {
                 }],
             });
 
-            model.selected.column_index = 0;
+            model.selected.column_index = Some(0);
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -2411,7 +2441,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 0,
+                    column_index: Some(0),
                     card_index: Some(0)
                 }
             );
@@ -2460,7 +2490,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 0,
+                    column_index: Some(0),
                     card_index: Some(1)
                 }
             );
@@ -2496,7 +2526,7 @@ mod tests {
                 }],
             });
 
-            model.selected.column_index = 0;
+            model.selected.column_index = Some(0);
             model.selected.card_index = Some(0);
 
             let mut terminal =
@@ -2509,7 +2539,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 0,
+                    column_index: Some(0),
                     card_index: Some(0)
                 }
             );
@@ -2558,7 +2588,7 @@ mod tests {
                 model.selected,
                 SelectedState {
                     board_index: None,
-                    column_index: 0,
+                    column_index: Some(0),
                     card_index: Some(0)
                 }
             );
@@ -2960,7 +2990,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(model.selected.column_index, 0);
+        assert_eq!(model.selected.column_index, None);
         assert_eq!(model.selected.card_index, None);
 
         let mut terminal =
@@ -3032,7 +3062,7 @@ mod tests {
             ]
         );
 
-        assert_eq!(model.selected.column_index, 0);
+        assert_eq!(model.selected.column_index, Some(0));
         assert_eq!(model.selected.card_index, Some(0));
 
         update(&mut model, crate::Message::ViewBoardsMode, &mut terminal).unwrap();
