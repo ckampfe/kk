@@ -1322,6 +1322,7 @@ fn handle_event(event: Event, model: &Model) -> Option<Message> {
             },
             Mode::ViewingCardDetail => match key.code {
                 KeyCode::Enter | KeyCode::Esc => Some(Message::ViewBoardMode),
+                KeyCode::Char('e') => Some(Message::EditCard),
                 KeyCode::Char('q') => Some(Message::Quit),
                 _ => None,
             },
@@ -1457,6 +1458,24 @@ where
         Mode::ViewingCardDetail => match msg {
             Message::ViewBoardMode => model.mode = Mode::ViewingBoard,
             Message::Quit => model.running_state = RunningState::Done,
+            Message::EditCard => {
+                if let Some(card) = model.selected_card() {
+                    let card_for_editor = format!("{}\n==========\n\n{}", card.title, card.body);
+
+                    let raw_card_text = run_editor_fn(terminal, &card_for_editor)?;
+
+                    let (title, body) = parse_raw_card_text(&raw_card_text)?;
+
+                    let updated_at = model.repo.update_card(card.id, title, body)?;
+
+                    // dumb but necessary to reborrow because we previously borrow the model immutably
+                    if let Some(card) = model.selected_card_mut() {
+                        card.title = title.to_string();
+                        card.body = body.to_string();
+                        card.updated_at = updated_at;
+                    }
+                }
+            }
             m => panic!("unhandled message: {:?}", m),
         },
         Mode::MovingCard => match msg {
