@@ -1223,12 +1223,14 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                     .iter()
                     .map(|(k, action)| format!("{} - {}", k, action))
                     .collect::<Vec<_>>(),
-                    Mode::ViewingCardDetail => {
-                        [("[enter/esc]", "close detail view"), ("[q]", "quit")]
-                            .iter()
-                            .map(|(k, action)| format!("{} - {}", k, action))
-                            .collect::<Vec<_>>()
-                    }
+                    Mode::ViewingCardDetail => [
+                        ("[enter/esc]", "close detail view"),
+                        ("[e]", "edit card"),
+                        ("[q]", "quit"),
+                    ]
+                    .iter()
+                    .map(|(k, action)| format!("{} - {}", k, action))
+                    .collect::<Vec<_>>(),
                     Mode::MovingCard => [
                         ("[h/left]", "move card left"),
                         ("[l/right]", "move card right"),
