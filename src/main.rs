@@ -18,9 +18,74 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+#[derive(Clone, Copy, Debug)]
+struct BoardId(i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
+struct CardId(i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
+struct ExternalCardId(i64);
+
+struct StatusId(i64);
+
+impl rusqlite::ToSql for BoardId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.0.into())
+    }
+}
+
+impl rusqlite::types::FromSql for BoardId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Ok(BoardId(value.as_i64()?))
+    }
+}
+
+impl rusqlite::ToSql for CardId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.0.into())
+    }
+}
+
+impl rusqlite::types::FromSql for CardId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Ok(CardId(value.as_i64()?))
+    }
+}
+
+impl rusqlite::ToSql for ExternalCardId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.0.into())
+    }
+}
+
+impl rusqlite::types::FromSql for ExternalCardId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Ok(ExternalCardId(value.as_i64()?))
+    }
+}
+
+impl Display for ExternalCardId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl rusqlite::ToSql for StatusId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.0.into())
+    }
+}
+
+impl rusqlite::types::FromSql for StatusId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Ok(StatusId(value.as_i64()?))
+    }
+}
+
 #[derive(Debug)]
 struct BoardMeta {
-    id: u64,
+    id: BoardId,
     name: String,
     columns: Vec<String>,
     inserted_at: String,
@@ -168,7 +233,7 @@ impl Model {
         }
     }
 
-    fn selected_card_id(&self) -> Option<u64> {
+    fn selected_card_id(&self) -> Option<CardId> {
         if let Some(card_index) = self.selected.card_index {
             self.selected_column()
                 .and_then(|column| column.cards.get(card_index).map(|card| card.id))
@@ -476,7 +541,7 @@ impl Repo {
         Ok(boards)
     }
 
-    fn load_board(&mut self, board_id: u64) -> anyhow::Result<Board> {
+    fn load_board(&mut self, board_id: BoardId) -> anyhow::Result<Board> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -516,7 +581,7 @@ impl Repo {
         })
     }
 
-    fn get_cards_for_board(&self, board_id: u64) -> anyhow::Result<Vec<Column>> {
+    fn get_cards_for_board(&self, board_id: BoardId) -> anyhow::Result<Vec<Column>> {
         let mut statuses_s = self.conn.prepare(
             "
             select
@@ -543,12 +608,12 @@ impl Repo {
         Ok(columns)
     }
 
-    fn insert_card(&mut self, board_id: u64, title: &str, body: &str) -> anyhow::Result<Card> {
+    fn insert_card(&mut self, board_id: BoardId, title: &str, body: &str) -> anyhow::Result<Card> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-        let status_id: u64 = tx.query_one(
+        let status_id: StatusId = tx.query_one(
             "
         select
             id
@@ -561,7 +626,7 @@ impl Repo {
             |row| row.get(0),
         )?;
 
-        let external_card_id: u64 = tx.query_one(
+        let external_card_id: ExternalCardId = tx.query_one(
             "
         select
             card_id
@@ -604,7 +669,7 @@ impl Repo {
         Ok(card)
     }
 
-    fn cards_for_column(&self, board_id: u64, column_name: &str) -> anyhow::Result<Vec<Card>> {
+    fn cards_for_column(&self, board_id: BoardId, column_name: &str) -> anyhow::Result<Vec<Card>> {
         let mut s = self.conn.prepare(
             "
             select
@@ -643,7 +708,7 @@ impl Repo {
         Ok(cards)
     }
 
-    fn update_card(&mut self, card_id: u64, title: &str, body: &str) -> anyhow::Result<String> {
+    fn update_card(&mut self, card_id: CardId, title: &str, body: &str) -> anyhow::Result<String> {
         self.conn.execute(
             "
         update cards
@@ -671,8 +736,8 @@ impl Repo {
 
     fn set_card_status(
         &self,
-        board_id: u64,
-        card_id: u64,
+        board_id: BoardId,
+        card_id: CardId,
         column_name: &str,
     ) -> anyhow::Result<()> {
         self.conn.execute(
@@ -693,7 +758,7 @@ impl Repo {
         Ok(())
     }
 
-    fn create_board(&mut self, name: &str, column_names: &[&str]) -> anyhow::Result<u64> {
+    fn create_board(&mut self, name: &str, column_names: &[&str]) -> anyhow::Result<i64> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -713,10 +778,14 @@ impl Repo {
                 ",
             )?;
 
-            let board_id: u64 = board_s.query_row([name], |row| row.get(0))?;
+            let board_id: i64 = board_s.query_row([name], |row| row.get(0))?;
 
             for (column_order, column_name) in column_names.iter().enumerate() {
-                columns_s.execute(params![column_name, column_order, board_id])?;
+                columns_s.execute(params![
+                    column_name,
+                    i64::try_from(column_order).expect("must be less than i64::MAX columns"),
+                    board_id
+                ])?;
             }
 
             board_id
@@ -729,7 +798,7 @@ impl Repo {
 
     fn update_board_columns_order(
         &mut self,
-        board_id: u64,
+        board_id: BoardId,
         board_name: &str,
         column_names: Vec<&str>,
     ) -> anyhow::Result<Board> {
@@ -755,7 +824,11 @@ impl Repo {
             )?;
 
             for (i, column_name) in column_names.iter().enumerate() {
-                change_column_order_s.execute(params![column_name, i, board_id])?;
+                change_column_order_s.execute(params![
+                    column_name,
+                    i64::try_from(i).unwrap(),
+                    board_id
+                ])?;
             }
 
             change_board_name_s.execute(params![board_name, board_id])?;
@@ -778,7 +851,7 @@ impl Repo {
         ",
         )?;
 
-        let board_meta: Option<(u64, String)> = board_s
+        let board_meta: Option<(BoardId, String)> = board_s
             .query_one([], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
 
@@ -795,7 +868,7 @@ impl Repo {
         }
     }
 
-    fn delete_card(&self, card_id: u64) -> anyhow::Result<()> {
+    fn delete_card(&self, card_id: CardId) -> anyhow::Result<()> {
         let mut s = self.conn.prepare(
             "
         delete from cards
@@ -810,7 +883,7 @@ impl Repo {
 
 #[derive(Debug)]
 struct Board {
-    id: u64,
+    id: BoardId,
     name: String,
     columns: Vec<Column>,
 }
@@ -843,10 +916,10 @@ impl Display for Column {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Card {
-    id: u64,
-    external_id: u64,
+    id: CardId,
+    external_id: ExternalCardId,
     title: String,
     body: String,
     inserted_at: String,
@@ -1713,9 +1786,27 @@ mod tests {
     use ratatui::Terminal;
 
     use crate::{
-        Card, ConfirmationState, Mode, Model, Options, RunningState, update,
-        update_with_run_editor_fn,
+        BoardId, Card, CardId, ConfirmationState, ExternalCardId, Mode, Model, Options,
+        RunningState, update, update_with_run_editor_fn,
     };
+
+    impl From<i64> for BoardId {
+        fn from(value: i64) -> Self {
+            Self(value)
+        }
+    }
+
+    impl From<i64> for CardId {
+        fn from(value: i64) -> Self {
+            Self(value)
+        }
+    }
+
+    impl From<i64> for ExternalCardId {
+        fn from(value: i64) -> Self {
+            Self(value)
+        }
+    }
 
     /// right now, we don't care about comparing whether cards
     /// have the same inserted_at and updated_at.
@@ -1835,7 +1926,7 @@ mod tests {
 
             let board = model.board.unwrap();
 
-            assert_eq!(board.columns[0].cards[0].id, 1);
+            assert_eq!(board.columns[0].cards[0].id, 1.into());
             assert_eq!(board.columns[0].cards[0].title, "Card1");
         }
     }
@@ -1916,8 +2007,8 @@ mod tests {
             assert_eq!(
                 model.board.unwrap().columns[0].cards,
                 vec![Card {
-                    id: 1,
-                    external_id: 1,
+                    id: 1.into(),
+                    external_id: 1.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -1929,10 +2020,10 @@ mod tests {
             assert_eq!(model.selected.card_index, Some(0));
 
             assert_eq!(
-                model.repo.cards_for_column(1, "Todo").unwrap(),
+                model.repo.cards_for_column(1.into(), "Todo").unwrap(),
                 vec![Card {
-                    id: 1,
-                    external_id: 1,
+                    id: 1.into(),
+                    external_id: 1.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -2003,8 +2094,8 @@ mod tests {
             assert_eq!(
                 model.board.unwrap().columns[0].cards,
                 vec![Card {
-                    id: 1,
-                    external_id: 1,
+                    id: 1.into(),
+                    external_id: 1.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -2016,10 +2107,10 @@ mod tests {
             assert_eq!(model.selected.card_index, Some(0));
 
             assert_eq!(
-                model.repo.cards_for_column(1, "Todo").unwrap(),
+                model.repo.cards_for_column(1.into(), "Todo").unwrap(),
                 vec![Card {
-                    id: 1,
-                    external_id: 1,
+                    id: 1.into(),
+                    external_id: 1.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -2083,8 +2174,8 @@ mod tests {
             assert_eq!(
                 model.board.unwrap().columns[0].cards,
                 vec![Card {
-                    id: 1,
-                    external_id: 1,
+                    id: 1.into(),
+                    external_id: 1.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -2096,10 +2187,10 @@ mod tests {
             assert_eq!(model.selected.card_index, Some(0));
 
             assert_eq!(
-                model.repo.cards_for_column(1, "Todo").unwrap(),
+                model.repo.cards_for_column(1.into(), "Todo").unwrap(),
                 vec![Card {
-                    id: 1,
-                    external_id: 1,
+                    id: 1.into(),
+                    external_id: 1.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -2173,14 +2264,14 @@ mod tests {
             .unwrap();
 
             model.board = Some(Board {
-                id: 1,
+                id: 1.into(),
                 name: "Board".to_string(),
                 columns: vec![
                     Column {
                         name: "Todo".to_string(),
                         cards: vec![Card {
-                            id: 1,
-                            external_id: 1,
+                            id: 1.into(),
+                            external_id: 1.into(),
                             title: "great card".to_string(),
                             body: "great body".to_string(),
                             inserted_at: "".to_string(),
@@ -2190,8 +2281,8 @@ mod tests {
                     Column {
                         name: "Doing".to_string(),
                         cards: vec![Card {
-                            id: 2,
-                            external_id: 2,
+                            id: 2.into(),
+                            external_id: 2.into(),
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2230,7 +2321,7 @@ mod tests {
             .unwrap();
 
             model.board = Some(Board {
-                id: 1,
+                id: 1.into(),
                 name: "Board".to_string(),
                 columns: vec![
                     Column {
@@ -2240,8 +2331,8 @@ mod tests {
                     Column {
                         name: "Doing".to_string(),
                         cards: vec![Card {
-                            id: 2,
-                            external_id: 1,
+                            id: 2.into(),
+                            external_id: 1.into(),
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2320,14 +2411,14 @@ mod tests {
             .unwrap();
 
             model.board = Some(Board {
-                id: 1,
+                id: 1.into(),
                 name: "Board".to_string(),
                 columns: vec![
                     Column {
                         name: "Todo".to_string(),
                         cards: vec![Card {
-                            id: 1,
-                            external_id: 1,
+                            id: 1.into(),
+                            external_id: 1.into(),
                             title: "great card".to_string(),
                             body: "great body".to_string(),
                             inserted_at: "".to_string(),
@@ -2337,8 +2428,8 @@ mod tests {
                     Column {
                         name: "Doing".to_string(),
                         cards: vec![Card {
-                            id: 2,
-                            external_id: 2,
+                            id: 2.into(),
+                            external_id: 2.into(),
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2377,14 +2468,14 @@ mod tests {
             .unwrap();
 
             model.board = Some(Board {
-                id: 1,
+                id: 1.into(),
                 name: "Board".to_string(),
                 columns: vec![
                     Column {
                         name: "Todo".to_string(),
                         cards: vec![Card {
-                            id: 2,
-                            external_id: 1,
+                            id: 2.into(),
+                            external_id: 1.into(),
                             title: "title 2".to_string(),
                             body: "body 2".to_string(),
                             inserted_at: "".to_string(),
@@ -2434,13 +2525,13 @@ mod tests {
             .unwrap();
 
             model.board = Some(Board {
-                id: 1,
+                id: 1.into(),
                 name: "Board".to_string(),
                 columns: vec![Column {
                     name: "Todo".to_string(),
                     cards: vec![Card {
-                        id: 2,
-                        external_id: 1,
+                        id: 2.into(),
+                        external_id: 1.into(),
                         title: "title 2".to_string(),
                         body: "body 2".to_string(),
                         inserted_at: "".to_string(),
@@ -2532,13 +2623,13 @@ mod tests {
             .unwrap();
 
             model.board = Some(Board {
-                id: 1,
+                id: 1.into(),
                 name: "Board".to_string(),
                 columns: vec![Column {
                     name: "Todo".to_string(),
                     cards: vec![Card {
-                        id: 2,
-                        external_id: 1,
+                        id: 2.into(),
+                        external_id: 1.into(),
                         title: "title 2".to_string(),
                         body: "body 2".to_string(),
                         inserted_at: "".to_string(),
@@ -2976,8 +3067,8 @@ mod tests {
 
         assert_eq!(
             &Card {
-                id: 1,
-                external_id: 1,
+                id: 1.into(),
+                external_id: 1.into(),
                 title: "Valid Title".to_string(),
                 body: "Valid card body".to_string(),
                 inserted_at: "".to_string(),
@@ -3065,16 +3156,16 @@ mod tests {
             model.board.as_ref().unwrap().columns[0].cards,
             vec![
                 Card {
-                    id: 2,
-                    external_id: 2,
+                    id: 2.into(),
+                    external_id: 2.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
                     updated_at: "".to_string(),
                 },
                 Card {
-                    id: 1,
-                    external_id: 1,
+                    id: 1.into(),
+                    external_id: 1.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
@@ -3121,16 +3212,16 @@ mod tests {
             model.board.as_ref().unwrap().columns[0].cards,
             vec![
                 Card {
-                    id: 4,
-                    external_id: 2,
+                    id: 4.into(),
+                    external_id: 2.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
                     updated_at: "".to_string(),
                 },
                 Card {
-                    id: 3,
-                    external_id: 1,
+                    id: 3.into(),
+                    external_id: 1.into(),
                     title: "Valid Title".to_string(),
                     body: "Valid card body".to_string(),
                     inserted_at: "".to_string(),
