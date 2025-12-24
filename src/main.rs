@@ -16,6 +16,7 @@ use std::fmt::Display;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug)]
@@ -119,6 +120,7 @@ struct Model {
     confirmation_state: ConfirmationState,
     repo: Repo,
     error: Option<String>,
+    highlight_color: Color,
     internal_event_tx: std::sync::mpsc::Sender<Event>,
     internal_event_rx: std::sync::mpsc::Receiver<Event>,
 }
@@ -184,6 +186,7 @@ impl Model {
             mode,
             running_state: RunningState::Running,
             repo,
+            highlight_color: Color::from_str(&options.highlight_color)?,
             error: None,
             internal_event_tx: tx,
             internal_event_rx: rx,
@@ -1025,11 +1028,9 @@ fn view_boards(model: &mut Model, frame: &mut ratatui::Frame<'_>) {
         })
         .collect::<Vec<_>>();
 
-    const PINK: Color = Color::Rgb(255, 150, 167);
-
     let list = List::new(list_items)
         .highlight_symbol("> ")
-        .highlight_style(Style::default().fg(PINK))
+        .highlight_style(Style::default().fg(model.highlight_color))
         .block(
             Block::new()
                 .border_type(ratatui::widgets::BorderType::Rounded)
@@ -1127,11 +1128,9 @@ fn view_board(model: &mut Model, frame: &mut ratatui::Frame) {
                 })
                 .collect::<Vec<_>>();
 
-            const PINK: Color = Color::Rgb(255, 150, 167);
-
             let list = List::new(list_items)
                 .highlight_symbol("> ")
-                .highlight_style(Style::default().fg(PINK))
+                .highlight_style(Style::default().fg(model.highlight_color))
                 .block(
                     Block::new()
                         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -1744,6 +1743,8 @@ fn parse_raw_board_text(raw_board_text: &str) -> anyhow::Result<(&str, Vec<&str>
 struct Options {
     #[arg(short, long, env)]
     database_path: Option<PathBuf>,
+    #[arg(short = 'c', long, env, default_value = "#FF96A7")]
+    highlight_color: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1818,6 +1819,15 @@ mod tests {
         }
     }
 
+    impl Options {
+        fn test_options() -> Options {
+            Options {
+                database_path: Some(":memory:".into()),
+                highlight_color: "#FF96A7".to_string(),
+            }
+        }
+    }
+
     mod create_board {
         use ratatui::Terminal;
 
@@ -1825,10 +1835,7 @@ mod tests {
 
         #[test]
         fn with_zero_columns() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -1850,10 +1857,7 @@ mod tests {
 
         #[test]
         fn with_at_least_one_column() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -1875,10 +1879,7 @@ mod tests {
 
         #[test]
         fn new_card_goes_to_correct_board_when_multiple_boards() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -1939,10 +1940,7 @@ mod tests {
 
         #[test]
         fn with_bad_input() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -1974,10 +1972,7 @@ mod tests {
 
         #[test]
         fn with_valid_input() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2043,10 +2038,7 @@ mod tests {
 
         #[test]
         fn with_bad_input() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2123,10 +2115,7 @@ mod tests {
 
         #[test]
         fn with_valid_input() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2204,10 +2193,7 @@ mod tests {
 
     #[test]
     fn update_quit() {
-        let mut model = Model::new(Options {
-            database_path: Some(":memory:".into()),
-        })
-        .unwrap();
+        let mut model = Model::new(Options::test_options()).unwrap();
 
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2225,10 +2211,7 @@ mod tests {
 
         #[test]
         fn when_left() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2258,10 +2241,7 @@ mod tests {
 
         #[test]
         fn when_right_with_card() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             model.board = Some(Board {
                 id: 1.into(),
@@ -2315,10 +2295,7 @@ mod tests {
 
         #[test]
         fn when_right_without_card() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             model.board = Some(Board {
                 id: 1.into(),
@@ -2372,10 +2349,7 @@ mod tests {
 
         #[test]
         fn when_right() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2405,10 +2379,7 @@ mod tests {
 
         #[test]
         fn when_left_with_card() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             model.board = Some(Board {
                 id: 1.into(),
@@ -2462,10 +2433,7 @@ mod tests {
 
         #[test]
         fn when_left_without_card() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             model.board = Some(Board {
                 id: 1.into(),
@@ -2519,10 +2487,7 @@ mod tests {
 
         #[test]
         fn when_length_is_one() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             model.board = Some(Board {
                 id: 1.into(),
@@ -2561,10 +2526,7 @@ mod tests {
 
         #[test]
         fn when_length_is_greater_than_one() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2617,10 +2579,7 @@ mod tests {
 
         #[test]
         fn when_length_is_one() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             model.board = Some(Board {
                 id: 1.into(),
@@ -2659,10 +2618,7 @@ mod tests {
 
         #[test]
         fn when_length_is_greater_than_one() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2714,10 +2670,7 @@ mod tests {
 
         #[test]
         fn switches_with_card() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2750,10 +2703,7 @@ mod tests {
 
         #[test]
         fn does_not_switch_without_card() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2784,10 +2734,7 @@ mod tests {
 
         #[test]
         fn switches_when_column_is_not_empty() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2825,10 +2772,7 @@ mod tests {
 
         #[test]
         fn does_not_switch_when_column_is_empty() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2862,10 +2806,7 @@ mod tests {
 
         #[test]
         fn switches() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -2891,10 +2832,7 @@ mod tests {
 
         #[test]
         fn navigate_down_with_one_board() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             model.create_board("Board1", &["Todo"]).unwrap();
 
@@ -2920,10 +2858,7 @@ mod tests {
 
         #[test]
         fn navigate_down_with_two_boards() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             assert_eq!(model.mode, Mode::ViewingBoards);
 
@@ -2959,10 +2894,7 @@ mod tests {
 
         #[test]
         fn navigate_up_with_one_board() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             assert_eq!(model.mode, Mode::ViewingBoards);
 
@@ -2988,10 +2920,7 @@ mod tests {
 
         #[test]
         fn navigate_up_with_two_boards() {
-            let mut model = Model::new(Options {
-                database_path: Some(":memory:".into()),
-            })
-            .unwrap();
+            let mut model = Model::new(Options::test_options()).unwrap();
 
             assert_eq!(model.mode, Mode::ViewingBoards);
 
@@ -3033,10 +2962,7 @@ mod tests {
 
     #[test]
     fn delete_card() {
-        let mut model = Model::new(Options {
-            database_path: Some(":memory:".into()),
-        })
-        .unwrap();
+        let mut model = Model::new(Options::test_options()).unwrap();
 
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
@@ -3097,10 +3023,7 @@ mod tests {
 
     #[test]
     fn card_ids_are_unique_and_increment_per_board() {
-        let mut model = Model::new(Options {
-            database_path: Some(":memory:".into()),
-        })
-        .unwrap();
+        let mut model = Model::new(Options::test_options()).unwrap();
 
         assert_eq!(model.selected.column_index, None);
         assert_eq!(model.selected.card_index, None);
