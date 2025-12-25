@@ -3155,4 +3155,49 @@ mod tests {
 
         assert_eq!(model.running_state, RunningState::Running);
     }
+
+    mod db_constraits {
+        use crate::{Model, Options, update_with_run_editor_fn};
+
+        #[test]
+        fn board_names_are_unique() {
+            let mut model = Model::new(Options::test_options()).unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            )
+            .unwrap();
+
+            let when_inserting_a_second_board_with_duplicate_name = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n".to_string()),
+            );
+
+            assert!(when_inserting_a_second_board_with_duplicate_name.is_err());
+        }
+        #[test]
+        fn columns_are_unique_per_board() {
+            let mut model = Model::new(Options::test_options()).unwrap();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 80)).unwrap();
+
+            let when_creating_duplicate_columns_on_board = update_with_run_editor_fn(
+                &mut model,
+                crate::Message::NewBoard,
+                &mut terminal,
+                |_terminal, _template| Ok("Board1\n=====\n\n- Todo\n- Todo\n".to_string()),
+            );
+
+            assert!(when_creating_duplicate_columns_on_board.is_err());
+        }
+    }
 }
