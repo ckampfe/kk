@@ -973,6 +973,7 @@ enum Message {
 fn run_editor<B>(terminal: &mut Terminal<B>, template_text: &str) -> anyhow::Result<String>
 where
     B: Backend,
+    B::Error: Send + Sync + 'static,
 {
     std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen)?;
     crossterm::terminal::disable_raw_mode()?;
@@ -1423,6 +1424,7 @@ fn update<B>(
 ) -> anyhow::Result<Option<Message>>
 where
     B: Backend,
+    B::Error: Send + Sync + 'static,
 {
     update_with_run_editor_fn(model, msg, terminal, run_editor)
 }
@@ -1750,8 +1752,6 @@ struct Options {
 fn main() -> anyhow::Result<()> {
     let options = Options::parse();
 
-    let mut terminal = ratatui::init();
-
     let mut model = Model::new(options)?;
 
     if let Some(board) = &model.board
@@ -1761,23 +1761,25 @@ fn main() -> anyhow::Result<()> {
         model.selected.card_index = Some(0);
     }
 
-    while model.running_state != RunningState::Done {
-        // Render the current view
-        terminal.draw(|f| view(&mut model, f))?;
+    ratatui::run(|terminal| -> anyhow::Result<()> {
+        while model.running_state != RunningState::Done {
+            // Render the current view
+            terminal.draw(|f| view(&mut model, f))?;
 
-        // Handle events and map to a Message
-        let mut current_msg = receive_event(&model)?;
+            // Handle events and map to a Message
+            let mut current_msg = receive_event(&model)?;
 
-        // Process updates as long as they return a non-None message
-        while let Some(m) = current_msg {
-            match update(&mut model, m, &mut terminal) {
-                Ok(m) => current_msg = m,
-                Err(e) => current_msg = Some(Message::SetError(Some(e.to_string()))),
+            // Process updates as long as they return a non-None message
+            while let Some(m) = current_msg {
+                match update(&mut model, m, terminal) {
+                    Ok(m) => current_msg = m,
+                    Err(e) => current_msg = Some(Message::SetError(Some(e.to_string()))),
+                }
             }
         }
-    }
 
-    ratatui::restore();
+        Ok(())
+    })?;
 
     Ok(())
 }
