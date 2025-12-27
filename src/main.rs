@@ -245,6 +245,67 @@ impl Model {
         }
     }
 
+    fn move_selected_card_left(&mut self) -> anyhow::Result<()> {
+        if let Some(board) = &mut self.board
+            && let Some(selected_column_index) = self.selected.column_index
+            && let Some(selected_card_index) = self.selected.card_index
+        {
+            let left_column_id = selected_column_index.saturating_sub(1);
+
+            if left_column_id != selected_column_index {
+                let card = board.columns[selected_column_index]
+                    .cards
+                    .remove(selected_card_index);
+
+                self.repo.set_card_status(
+                    board.id,
+                    card.id,
+                    &board.columns[left_column_id].name,
+                )?;
+
+                board.columns[left_column_id].cards.insert(0, card);
+
+                self.selected.card_index = Some(0);
+
+                self.selected.column_index = Some(left_column_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn move_selected_card_right(&mut self) -> anyhow::Result<()> {
+        if let Some(board) = &mut self.board
+            && let Some(selected_column_index) = self.selected.column_index
+            && let Some(selected_card_index) = self.selected.card_index
+        {
+            let right_column_index = min(
+                selected_column_index + 1,
+                board.columns.len().saturating_sub(1),
+            );
+
+            if right_column_index != selected_column_index {
+                let card = board.columns[selected_column_index]
+                    .cards
+                    .remove(selected_card_index);
+
+                self.repo.set_card_status(
+                    board.id,
+                    card.id,
+                    &board.columns[right_column_index].name,
+                )?;
+
+                board.columns[right_column_index].cards.insert(0, card);
+
+                self.selected.card_index = Some(0);
+
+                self.selected.column_index = Some(right_column_index);
+            }
+        }
+
+        Ok(())
+    }
+
     fn toggle_confirmation_state(&mut self) {
         self.confirmation_state = self.confirmation_state.toggle();
     }
@@ -1555,8 +1616,8 @@ where
             m => panic!("unhandled message: {:?}", m),
         },
         Mode::MovingCard => match msg {
-            Message::MoveCardLeft => move_selected_card_left(model)?,
-            Message::MoveCardRight => move_selected_card_right(model)?,
+            Message::MoveCardLeft => model.move_selected_card_left()?,
+            Message::MoveCardRight => model.move_selected_card_right()?,
             Message::ViewBoardMode => {
                 model.mode = Mode::ViewingBoard;
                 if let Some(board) = model.board.as_mut() {
@@ -1630,70 +1691,6 @@ where
     }
 
     Ok(None)
-}
-
-// TODO move this onto Model impl
-fn move_selected_card_left(model: &mut Model) -> anyhow::Result<()> {
-    if let Some(board) = &mut model.board
-        && let Some(selected_column_index) = model.selected.column_index
-        && let Some(selected_card_index) = model.selected.card_index
-    {
-        // let current_column_id = selected_column_index;
-        let left_column_id = selected_column_index.saturating_sub(1);
-
-        if left_column_id != selected_column_index {
-            let card = board.columns[selected_column_index]
-                .cards
-                .remove(selected_card_index);
-
-            model
-                .repo
-                .set_card_status(board.id, card.id, &board.columns[left_column_id].name)?;
-
-            board.columns[left_column_id].cards.insert(0, card);
-
-            model.selected.card_index = Some(0);
-
-            model.selected.column_index = Some(left_column_id);
-        }
-    }
-
-    Ok(())
-}
-
-// TODO move this onto Model impl
-fn move_selected_card_right(model: &mut Model) -> anyhow::Result<()> {
-    if let Some(board) = &mut model.board
-        && let Some(selected_column_index) = model.selected.column_index
-        && let Some(selected_card_index) = model.selected.card_index
-    {
-        // let current_column_id = model.selected.column_index;
-
-        let right_column_index = min(
-            selected_column_index + 1,
-            board.columns.len().saturating_sub(1),
-        );
-
-        if right_column_index != selected_column_index {
-            let card = board.columns[selected_column_index]
-                .cards
-                .remove(selected_card_index);
-
-            model.repo.set_card_status(
-                board.id,
-                card.id,
-                &board.columns[right_column_index].name,
-            )?;
-
-            board.columns[right_column_index].cards.insert(0, card);
-
-            model.selected.card_index = Some(0);
-
-            model.selected.column_index = Some(right_column_index);
-        }
-    }
-
-    Ok(())
 }
 
 fn parse_raw_card_text(raw_card_text: &str) -> anyhow::Result<(&str, &str)> {
