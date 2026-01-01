@@ -491,6 +491,11 @@ impl Repo {
         let mut conn = rusqlite::Connection::open(database_path)?;
 
         conn.pragma_update(None, "foreign_keys", "on")?;
+        conn.pragma_update(None, "synchronous", "extra")?;
+
+        #[cfg(target_os = "macos")]
+        conn.pragma_update(None, "fullfsync", true)?;
+
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         Self::setup_database(&mut conn)?;
