@@ -139,21 +139,17 @@ impl Model {
             Mode::ViewingBoards
         };
 
-        let selected = if let Some(board) = &board {
-            SelectedState {
-                board_index: None,
-                column_index: board.columns.first().map(|_| 0),
-                card_index: board
+        let selected = SelectedState {
+            board_index: None,
+            column_index: board
+                .as_ref()
+                .and_then(|board| board.columns.first().map(|_| 0)),
+            card_index: board.as_ref().and_then(|board| {
+                board
                     .columns
                     .first()
-                    .and_then(|column| column.cards.first().map(|_card| 0)),
-            }
-        } else {
-            SelectedState {
-                board_index: None,
-                column_index: None,
-                card_index: None,
-            }
+                    .and_then(|column| column.cards.first().map(|_card| 0))
+            }),
         };
 
         Ok(Self {
