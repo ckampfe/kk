@@ -133,49 +133,27 @@ impl Model {
 
         let board = repo.load_most_recently_viewed_board()?;
 
-        // is a board
-        // is a column
-        // is a card
-        let (mode, selected) = if let Some(board) = &board {
-            if let Some(column) = board.columns.first() {
-                if column.cards.is_empty() {
-                    (
-                        Mode::ViewingBoard,
-                        SelectedState {
-                            board_index: None,
-                            column_index: None,
-                            card_index: None,
-                        },
-                    )
-                } else {
-                    (
-                        Mode::ViewingBoard,
-                        SelectedState {
-                            board_index: None,
-                            column_index: Some(0),
-                            card_index: Some(0),
-                        },
-                    )
-                }
-            } else {
-                (
-                    Mode::ViewingBoard,
-                    SelectedState {
-                        board_index: None,
-                        column_index: Some(0),
-                        card_index: None,
-                    },
-                )
+        let mode = if board.is_some() {
+            Mode::ViewingBoard
+        } else {
+            Mode::ViewingBoards
+        };
+
+        let selected = if let Some(board) = &board {
+            SelectedState {
+                board_index: None,
+                column_index: board.columns.first().map(|_| 0),
+                card_index: board
+                    .columns
+                    .first()
+                    .and_then(|column| column.cards.first().map(|_card| 0)),
             }
         } else {
-            (
-                Mode::ViewingBoards,
-                SelectedState {
-                    board_index: None,
-                    column_index: None,
-                    card_index: None,
-                },
-            )
+            SelectedState {
+                board_index: None,
+                column_index: None,
+                card_index: None,
+            }
         };
 
         Ok(Self {
